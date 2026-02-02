@@ -65,7 +65,7 @@ public class LlmService {
         String url = "https://api.openai.com/v1/chat/completions";
 
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(openAiApiKey);
+        headers.setBearerAuth(openAiApiKey != null ? openAiApiKey.trim() : "");
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         List<Map<String, String>> messages = new ArrayList<>();

@@ -76,7 +76,7 @@ public class SttService {
                     (wavAudio.length - 44) / 16); // approx ms @ 8kHz PCM
 
             HttpHeaders headers = new HttpHeaders();
-            headers.setBearerAuth(openAiApiKey);
+            headers.setBearerAuth(openAiApiKey != null ? openAiApiKey.trim() : "");
             headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
             MultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
