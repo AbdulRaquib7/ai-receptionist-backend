@@ -25,11 +25,6 @@ public class VoiceController {
     @Value("${twilio.base-url:}")
     private String baseUrl;
 
-    @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> inbound() {
-        return inboundTwiMl();
-    }
-
     @PostMapping(value = "/twilio/voice/inbound", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> twilioVoiceInbound() {
         return inboundTwiMl();
@@ -80,10 +75,6 @@ public class VoiceController {
         return continueCallTwiMl();
     }
 
-    /**
-     * After AI speaks: re-connect stream only (no "I'm listening", no pause).
-     * Do NOT redirect to inbound (that would replay "Hello, how can I help you?").
-     */
     private ResponseEntity<String> continueCallTwiMl() {
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + connectTwiml + "</Response>";

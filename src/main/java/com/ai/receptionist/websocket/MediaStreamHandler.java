@@ -19,7 +19,8 @@ import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
@@ -28,7 +29,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
     private static final int SILENCE_FRAMES = 20;
-    private static final int MIN_AUDIO_BYTES = 12000;
+    private static final int MIN_AUDIO_BYTES = 12_000;
+    private static final int MAX_AUDIO_BYTES = 160_000; 
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
@@ -37,6 +39,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
+    private final Executor sttExecutor;
 
     public MediaStreamHandler(
             SttService sttService,
@@ -48,12 +51,14 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
+
+        this.sttExecutor = Executors.newFixedThreadPool(4);
     }
 
     static class StreamState {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        AtomicBoolean processing = new AtomicBoolean(false);
         int silenceFrames = 0;
-        boolean processing = false;
         boolean closed = false;
         String callSid;
     }
@@ -65,35 +70,35 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String event = root.path("event").asText();
         String streamSid = root.path("streamSid").asText();
 
-        if ("start".equals(event)) {
+        switch (event) {
+
+        case "start":
             StreamState state = new StreamState();
             JsonNode start = root.path("start");
-            if (!start.isMissingNode()) {
-                state.callSid = start.path("callSid").asText();
-            }
-            if (state.callSid == null || state.callSid.isEmpty()) {
-                state.callSid = root.path("callSid").asText();
-            }
+            state.callSid = start.path("callSid").asText();
             streams.put(streamSid, state);
             log.info("Call started | streamSid={} callSid={}", streamSid, state.callSid);
-            return;
-        }
+            break;
 
-        if ("media".equals(event)) {
-            handleMedia(streamSid, root, session);
-            return;
-        }
+        case "media":
+            handleMedia(streamSid, root);
+            break;
 
-        if ("stop".equals(event)) {
+        case "stop":
             log.info("Call/stream ended | {}", streamSid);
             cleanup(streamSid);
-        }
+            break;
+
+        default:
+            break;
     }
 
-    private void handleMedia(String streamSid, JsonNode root, WebSocketSession session) {
+    }
+
+    private void handleMedia(String streamSid, JsonNode root) {
 
         StreamState state = streams.get(streamSid);
-        if (state == null || state.closed || state.processing) return;
+        if (state == null || state.closed) return;
 
         String payload = root.path("media").path("payload").asText(null);
         if (StringUtils.isBlank(payload)) return;
@@ -107,13 +112,17 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             state.silenceFrames = 0;
         }
 
-        if (state.silenceFrames >= SILENCE_FRAMES && state.buffer.size() >= MIN_AUDIO_BYTES) {
-
-            state.processing = true;
+        if (state.silenceFrames >= SILENCE_FRAMES &&
+            state.buffer.size() >= MIN_AUDIO_BYTES &&
+            state.processing.compareAndSet(false, true)) {
 
             byte[] utterance = state.buffer.toByteArray();
             state.buffer.reset();
             state.silenceFrames = 0;
+
+            if (utterance.length > MAX_AUDIO_BYTES) {
+                utterance = java.util.Arrays.copyOf(utterance, MAX_AUDIO_BYTES);
+            }
 
             processUtteranceAsync(streamSid, utterance, state);
         }
@@ -125,38 +134,24 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
-    /**
-     * Returns true if the exchange indicates the conversation is over (e.g. goodbye, thanks, have a great day).
-     */
-    private boolean isConversationEnded(String aiReply, String userMessage) {
-        if (aiReply == null) return false;
-        String ai = aiReply.toLowerCase().trim();
-        String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
-        if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")) {
-            return true;
-        }
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("that is all")
-                || user.contains("nothing else")
-                || (user.contains("thank you") && (user.contains("bye") || user.length() < 30))) {
-            return true;
-        }
-        return false;
-    }
-
     private void processUtteranceAsync(String streamSid, byte[] audio, StreamState state) {
+
         CompletableFuture.runAsync(() -> {
             try {
-
-                if (audio.length < MIN_AUDIO_BYTES || state.closed) return;
+                if (state.closed || audio.length < MIN_AUDIO_BYTES) return;
 
                 String callSid = state.callSid;
-                if (callSid == null || callSid.isEmpty()) {
-                    log.warn("No callSid for stream {}; cannot speak response", streamSid);
-                    return;
-                }
+                if (StringUtils.isBlank(callSid)) return;
 
                 String userText = sttService.transcribe(audio);
-                if (StringUtils.isBlank(userText) || userText.length() < 5) return;
+                if (StringUtils.isBlank(userText)) {
+                    twilioService.speakResponse(
+                            callSid,
+                            "Sorry, I didn’t catch that. Could you please repeat?",
+                            false
+                    );
+                    return;
+                }
 
                 log.info("USER | {}", userText);
                 conversationStore.appendUser(callSid, userText);
@@ -169,17 +164,26 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 conversationStore.appendAssistant(callSid, aiText);
 
                 boolean endCall = isConversationEnded(aiText, userText);
-                if (endCall) {
-                    log.info("Conversation ended -> will hang up after speaking");
-                }
                 twilioService.speakResponse(callSid, aiText, endCall);
 
             } catch (Exception e) {
                 log.error("Pipeline error", e);
             } finally {
-                state.processing = false;
+                state.processing.set(false);
             }
-        });
+        }, sttExecutor);
+    }
+
+    private boolean isConversationEnded(String aiReply, String userMessage) {
+        if (aiReply == null) return false;
+        String ai = aiReply.toLowerCase();
+        String user = userMessage != null ? userMessage.toLowerCase() : "";
+
+        return ai.contains("goodbye")
+                || ai.contains("have a great day")
+                || user.contains("that's all")
+                || user.contains("nothing else")
+                || (user.contains("thank you") && user.length() < 30);
     }
 
     private void cleanup(String streamSid) {
