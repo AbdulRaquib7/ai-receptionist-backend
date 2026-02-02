@@ -1,6 +1,8 @@
 package com.ai.receptionist.websocket;
 
+import com.ai.receptionist.entity.AppointmentSlot;
 import com.ai.receptionist.entity.ChatMessage;
+import com.ai.receptionist.service.BookingFlowService;
 import com.ai.receptionist.service.ConversationStore;
 import com.ai.receptionist.service.LlmService;
 import com.ai.receptionist.service.SttService;
@@ -37,17 +39,20 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
+    private final BookingFlowService bookingFlowService;
 
     public MediaStreamHandler(
             SttService sttService,
             LlmService llmService,
             TwilioService twilioService,
-            ConversationStore conversationStore
+            ConversationStore conversationStore,
+            BookingFlowService bookingFlowService
     ) {
         this.sttService = sttService;
         this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
+        this.bookingFlowService = bookingFlowService;
     }
 
     static class StreamState {
@@ -162,13 +167,23 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 conversationStore.appendUser(callSid, userText);
 
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
-                String aiText = llmService.generateReply(history);
+                BookingFlowService.BookingFlowResult flowResult = bookingFlowService.processUtterance(callSid, userText, history);
+
+                String aiText;
+                if (flowResult.bookingSuccess() && flowResult.bookedSlot() != null) {
+                    AppointmentSlot s = flowResult.bookedSlot();
+                    aiText = "Your appointment is confirmed for " + s.getSlotDate() + " at " + s.getStartTime() + " with " + s.getDoctor().getName() + ". Thank you for calling.";
+                } else if (flowResult.bookingConflict()) {
+                    aiText = flowResult.aiText() != null ? flowResult.aiText() : "Sorry, that slot was just booked. Let me offer you alternative times.";
+                } else {
+                    aiText = flowResult.aiText();
+                }
                 if (StringUtils.isBlank(aiText)) return;
 
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, aiText);
 
-                boolean endCall = isConversationEnded(aiText, userText);
+                boolean endCall = isConversationEnded(aiText, userText) || flowResult.bookingSuccess();
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }

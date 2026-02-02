@@ -1,6 +1,7 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.entity.ChatMessage;
+import com.ai.receptionist.entity.ConversationState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -22,11 +23,17 @@ import java.util.Map;
 
 /**
  * Generates replies using OpenAI Chat Completions.
+ * Supports structured context (doctor list, slots) to prevent hallucination.
  */
 @Service
 public class LlmService {
 
     private static final Logger log = LoggerFactory.getLogger(LlmService.class);
+
+    private static final String BASE_SYSTEM_PROMPT =
+            "You are a concise, friendly medical receptionist. You help with doctor appointment booking. " +
+            "You ONLY use the data provided to you. Never assume slot availability or book appointments yourself. " +
+            "You ask short clarifying questions and give brief responses. Keep answers suitable for phone/voice.";
 
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -42,7 +49,14 @@ public class LlmService {
     }
 
     public String generateReply(List<ChatMessage> history) {
+        return generateReplyWithContext(history, null);
+    }
 
+    /**
+     * Generate reply with conversation state and structured context.
+     * Context is injected into the system prompt to prevent hallucination.
+     */
+    public String generateReplyWithContext(List<ChatMessage> history, LlmContext context) {
         if (StringUtils.isBlank(openAiApiKey)) {
             log.error("OPENAI_API_KEY is not set");
             return "";
@@ -54,19 +68,14 @@ public class LlmService {
         headers.setBearerAuth(openAiApiKey);
         headers.setContentType(MediaType.APPLICATION_JSON);
 
-        // Build messages list
         List<Map<String, String>> messages = new ArrayList<>();
 
-        // System prompt (always first)
+        String systemContent = buildSystemPrompt(context);
         Map<String, String> systemMsg = new HashMap<>();
         systemMsg.put("role", "system");
-        systemMsg.put(
-                "content",
-                "You are a concise, friendly receptionist who answers calls, asks short clarifying questions, and provides brief responses."
-        );
+        systemMsg.put("content", systemContent);
         messages.add(systemMsg);
 
-        // Conversation history
         for (ChatMessage msg : history) {
             Map<String, String> message = new HashMap<>();
             message.put("role", msg.getRole());
@@ -80,24 +89,48 @@ public class LlmService {
         body.put("messages", messages);
 
         try {
-            HttpEntity<Map<String, Object>> request =
-                    new HttpEntity<>(body, headers);
-
-            ResponseEntity<String> response =
-                    restTemplate.postForEntity(url, request, String.class);
+            HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
 
             JsonNode root = mapper.readTree(response.getBody());
-            return root
-                    .path("choices")
-                    .path(0)
-                    .path("message")
-                    .path("content")
-                    .asText("")
-                    .trim();
-
+            return root.path("choices").path(0).path("message").path("content").asText("").trim();
         } catch (Exception ex) {
             log.error("Failed to get LLM reply", ex);
             return "";
+        }
+    }
+
+    private String buildSystemPrompt(LlmContext ctx) {
+        StringBuilder sb = new StringBuilder(BASE_SYSTEM_PROMPT);
+        if (ctx != null) {
+            sb.append("\n\nCurrent state: ").append(ctx.state());
+            if (ctx.stateInstructions() != null && !ctx.stateInstructions().isEmpty()) {
+                sb.append("\n").append(ctx.stateInstructions());
+            }
+            if (ctx.doctorListText() != null && !ctx.doctorListText().isEmpty()) {
+                sb.append("\n\nUse ONLY these doctors when listing or discussing:\n").append(ctx.doctorListText());
+            }
+            if (ctx.slotListText() != null && !ctx.slotListText().isEmpty()) {
+                sb.append("\n\nUse ONLY these available slots when offering times:\n").append(ctx.slotListText());
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Structured context for LLM to prevent hallucination.
+     */
+    public record LlmContext(
+            ConversationState state,
+            String stateInstructions,
+            String doctorListText,
+            String slotListText
+    ) {
+        public static LlmContext of(ConversationState state) {
+            return new LlmContext(state, null, null, null);
+        }
+        public static LlmContext of(ConversationState state, String instructions) {
+            return new LlmContext(state, instructions, null, null);
         }
     }
 }
