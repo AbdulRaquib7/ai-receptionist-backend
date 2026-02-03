@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 @Service
 public class CallStateService {
@@ -75,4 +76,14 @@ public class CallStateService {
         state.setState(newState);
         return repository.save(state);
     }
+    
+    @Transactional
+    public void saveCallerPhone(String callSid, String callerPhone) {
+        CallStateEntity state = getOrCreate(callSid);
+        if (!StringUtils.hasText(state.getCallerPhone())) {
+            state.setCallerPhone(callerPhone);
+            repository.save(state);
+        }
+    }
+
 }

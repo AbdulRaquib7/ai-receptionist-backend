@@ -7,5 +7,5 @@ import org.springframework.stereotype.Repository;
 import java.util.List;
 @Repository
 public interface DoctorRepository extends JpaRepository<Doctor, Long> {
-    List<Doctor> findByActiveTrueOrderByName();
+    List<Doctor> findByisActiveTrueOrderByName();
 }

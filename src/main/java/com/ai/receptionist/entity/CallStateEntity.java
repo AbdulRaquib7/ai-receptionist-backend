@@ -36,6 +36,8 @@ public class CallStateEntity {
     private String patientName;
 
     private String patientPhone;
+    
+    private String callerPhone;
 
     private Instant createdAt;
 

@@ -27,12 +27,15 @@ public class VoiceController {
     // ✅ ONLY inbound endpoint Twilio calls
     @PostMapping(value = "/twilio/voice/inbound", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> inbound() {
-        String say =
-            "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you?</Say>";
+    	String sayTwiml =
+    			  "<Say voice=\"" + escapeXml(VOICE) + "\">" +
+    			  "Hello, this is the AI Clinic assistant. Would you like to book a doctor appointment today?" +
+    			  "</Say>";
+
         String connect =
             "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         log.info("Inbound call -> stream to {}", mediaStreamUrl);
-        return ResponseEntity.ok("<Response>" + say + connect + "</Response>");
+        return ResponseEntity.ok("<Response>" + sayTwiml + connect + "</Response>");
     }
 
     @RequestMapping(

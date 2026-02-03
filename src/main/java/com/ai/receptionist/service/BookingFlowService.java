@@ -76,8 +76,19 @@ public class BookingFlowService {
                 }
             }
 
-            case USER_DETAILS ->
-                    instructions = "Ask for the caller's name and phone number.";
+            case USER_DETAILS -> {
+                if (state.getCallerPhone() != null && !state.getCallerPhone().isEmpty()) {
+                    instructions =
+                        "The caller's phone number on record is "
+                        + maskPhone(state.getCallerPhone())
+                        + ". Ask if this number should be used for the appointment "
+                        + "or if they want to provide a different number. "
+                        + "Also ask for their name.";
+                } else {
+                    instructions =
+                        "Ask for the caller's name and phone number to confirm the booking.";
+                }
+            }
 
             case CONFIRMATION ->
                     instructions = "Ask the caller to confirm the booking. Do not assume yes.";
@@ -219,4 +230,10 @@ public class BookingFlowService {
             return new BookingFlowResult(message, false, true, null);
         }
     }
+    
+    private String maskPhone(String phone) {
+        if (phone.length() < 4) return phone;
+        return "****" + phone.substring(phone.length() - 4);
+    }
+
 }

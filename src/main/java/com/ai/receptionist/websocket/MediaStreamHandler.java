@@ -3,6 +3,7 @@ package com.ai.receptionist.websocket;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.entity.AppointmentSlot;
 import com.ai.receptionist.service.BookingFlowService;
+import com.ai.receptionist.service.CallStateService;
 import com.ai.receptionist.service.ConversationStore;
 import com.ai.receptionist.service.SttService;
 import com.ai.receptionist.service.TwilioService;
@@ -10,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.socket.TextMessage;
@@ -45,25 +47,23 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
 
-    private final SttService sttService;
-    private final TwilioService twilioService;
-    private final ConversationStore conversationStore;
-    private final BookingFlowService bookingFlowService;
+    @Autowired
+    private  SttService sttService;
+    
+    @Autowired
+    private  TwilioService twilioService;
+    
+    @Autowired
+    private  ConversationStore conversationStore;
+    
+    @Autowired
+    private  BookingFlowService bookingFlowService;
+    
+    @Autowired
+    private CallStateService callStateService;
 
     private final ExecutorService audioExecutor =
             Executors.newFixedThreadPool(4);
-
-    public MediaStreamHandler(
-            SttService sttService,
-            TwilioService twilioService,
-            ConversationStore conversationStore,
-            BookingFlowService bookingFlowService
-    ) {
-        this.sttService = sttService;
-        this.twilioService = twilioService;
-        this.conversationStore = conversationStore;
-        this.bookingFlowService = bookingFlowService;
-    }
 
     static class StreamState {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -82,11 +82,22 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
         if ("start".equals(event)) {
             StreamState state = new StreamState();
-            state.callSid = root.path("start").path("callSid").asText();
+
+            JsonNode start = root.path("start");
+            state.callSid = start.path("callSid").asText();
+
+            String from = start.path("from").asText(null);
+
             streams.put(streamSid, state);
-            log.info("Call started | streamSid={} callSid={}", streamSid, state.callSid);
+            log.info("Call started | callSid={} from={}", state.callSid, from);
+
+            // 👇 SAVE CALLER PHONE IMMEDIATELY
+            if (StringUtils.hasText(from)) {
+                callStateService.saveCallerPhone(state.callSid, normalizePhone(from));
+            }
             return;
         }
+
 
         if ("media".equals(event)) {
             handleMedia(streamSid, root);
@@ -198,4 +209,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             state.closed = true;
         }
     }
+    
+    private String normalizePhone(String raw) {
+        return raw.replaceAll("[^0-9+]", "");
+    }
+
 }
