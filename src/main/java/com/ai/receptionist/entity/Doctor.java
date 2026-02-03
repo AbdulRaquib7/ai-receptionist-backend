@@ -16,14 +16,13 @@ public class Doctor {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
     private String name;
 
-    @Column(nullable = false)
     private String specialization;
 
-    @Column(length = 500)
     private String description;
+    
+    private Integer experienceYears;
 
     @Column(nullable = false)
     @Builder.Default

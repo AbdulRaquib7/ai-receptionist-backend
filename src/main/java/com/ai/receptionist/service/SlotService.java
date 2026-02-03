@@ -58,16 +58,25 @@ public class SlotService {
      */
     @Transactional
     public List<AppointmentSlot> getAvailableSlots(Long doctorId) {
+
         LocalDate from = LocalDate.now();
         LocalDate to = from.plusDays(DAYS_AHEAD);
-        List<AppointmentSlot> existing = slotRepository
-                .findByDoctorIdAndSlotDateBetweenAndStatusOrderBySlotDateAscStartTimeAsc(
-                        doctorId, from, to, AppointmentSlot.Status.AVAILABLE);
-        if (!existing.isEmpty()) return existing;
 
-        // Generate slots if none exist
-        return generateAndSaveSlots(doctorId);
+        List<AppointmentSlot> any =
+            slotRepository.findByDoctorIdAndSlotDateBetweenOrderBySlotDateAscStartTimeAsc(
+                doctorId, from, to);
+
+        if (any.isEmpty()) {
+            generateAndSaveSlots(doctorId);
+            any = slotRepository.findByDoctorIdAndSlotDateBetweenOrderBySlotDateAscStartTimeAsc(
+                    doctorId, from, to);
+        }
+
+        return any.stream()
+                .filter(s -> s.getStatus() == AppointmentSlot.Status.AVAILABLE)
+                .toList();
     }
+
 
     @Transactional
     public List<AppointmentSlot> generateAndSaveSlots(Long doctorId) {

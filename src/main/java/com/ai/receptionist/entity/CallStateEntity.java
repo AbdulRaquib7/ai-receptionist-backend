@@ -5,6 +5,8 @@ import lombok.*;
 
 import java.time.Instant;
 
+import com.ai.receptionist.utils.ConversationState;
+
 @Entity
 @Table(name = "call_state", indexes = {
     @Index(name = "idx_call_state_call_sid", columnList = "call_sid", unique = true)
@@ -20,7 +22,6 @@ public class CallStateEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "call_sid", nullable = false, unique = true)
     private String callSid;
 
     @Enumerated(EnumType.STRING)
@@ -28,22 +29,16 @@ public class CallStateEntity {
     @Builder.Default
     private ConversationState state = ConversationState.GREETING;
 
-    @Column(name = "selected_doctor_id")
     private Long selectedDoctorId;
 
-    @Column(name = "selected_slot_id")
     private Long selectedSlotId;
 
-    @Column(name = "patient_name")
     private String patientName;
 
-    @Column(name = "patient_phone")
     private String patientPhone;
 
-    @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
-    @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
     @PrePersist

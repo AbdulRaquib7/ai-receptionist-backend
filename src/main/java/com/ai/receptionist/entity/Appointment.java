@@ -1,5 +1,9 @@
 package com.ai.receptionist.entity;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -29,6 +33,10 @@ public class Appointment {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "slot_id", nullable = false, unique = true)
     private AppointmentSlot slot;
+    
+    private LocalDate appointmentDate;
+
+    private LocalTime appointmentTime;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)

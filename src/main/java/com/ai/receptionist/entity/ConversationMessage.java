@@ -20,16 +20,12 @@ public class ConversationMessage {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "call_sid", nullable = false)
     private String callSid;
 
-    @Column(nullable = false)
     private String role;
 
-    @Column(nullable = false, length = 4000)
     private String content;
 
-    @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
     @PrePersist

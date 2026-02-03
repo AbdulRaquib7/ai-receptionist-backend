@@ -1,6 +1,10 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.entity.ChatMessage;
+import com.ai.receptionist.dto.ChatMessageDto;
 import com.ai.receptionist.entity.*;
+import com.ai.receptionist.utils.ConversationState;
+
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,9 +37,6 @@ public class BookingFlowService {
         this.llmService = llmService;
     }
 
-    /**
-     * Build LLM context from current call state (doctors, slots from DB only).
-     */
     public LlmService.LlmContext buildContext(String callSid) {
         CallStateEntity state = callStateService.getOrCreate(callSid);
         ConversationState cs = state.getState();
@@ -45,161 +46,169 @@ public class BookingFlowService {
         String instructions = null;
 
         switch (cs) {
-            case INTENT_CONFIRMATION -> instructions = "Ask if they would like to book a doctor appointment.";
+            case INTENT_CONFIRMATION ->
+                    instructions = "Ask if they would like to book a doctor appointment.";
+
             case DOCTOR_LIST -> {
                 List<Doctor> doctors = slotService.getActiveDoctors();
                 doctorListText = doctors.isEmpty()
                         ? "No doctors available."
                         : doctors.stream()
-                                .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
-                                .collect(Collectors.joining("\n"));
+                            .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
+                            .collect(Collectors.joining("\n"));
             }
+
             case DOCTOR_SELECTED, SLOT_SELECTION -> {
                 Long docId = state.getSelectedDoctorId();
                 if (docId != null) {
                     doctorListText = slotService.getDoctor(docId)
                             .map(d -> "Selected: " + d.getName() + " (" + d.getSpecialization() + ")")
                             .orElse(null);
+
                     List<AppointmentSlot> slots = slotService.getAvailableSlots(docId);
                     slotListText = slots.isEmpty()
                             ? "No available slots."
                             : slots.stream()
-                                    .limit(10)
-                                    .map(s -> "- " + s.getSlotDate().format(DATE_FMT) + " at " + s.getStartTime().format(TIME_FMT))
-                                    .collect(Collectors.joining("\n"));
+                                .limit(10)
+                                .map(s -> "- " + s.getSlotDate().format(DATE_FMT)
+                                        + " at " + s.getStartTime().format(TIME_FMT))
+                                .collect(Collectors.joining("\n"));
                 }
             }
-            case USER_DETAILS -> instructions = "Ask for the caller's name and phone number to confirm the booking.";
-            case CONFIRMATION -> instructions = "Ask the caller to confirm the booking. Do not assume yes.";
-            case GREETING, COMPLETED -> instructions = "Be friendly. If booking intent, guide to doctor selection.";
-            default -> {}
+
+            case USER_DETAILS ->
+                    instructions = "Ask for the caller's name and phone number.";
+
+            case CONFIRMATION ->
+                    instructions = "Ask the caller to confirm the booking. Do not assume yes.";
+
+            default ->
+                    instructions = "Be friendly and guide the caller step by step.";
         }
 
         return new LlmService.LlmContext(cs, instructions, doctorListText, slotListText);
     }
 
-    /**
-     * Process user utterance, update state, and return AI reply.
-     */
     public BookingFlowResult processUtterance(String callSid, String userText, List<ChatMessage> history) {
+
         CallStateEntity state = callStateService.getOrCreate(callSid);
         String lower = userText.toLowerCase().trim();
 
-        // Intent: booking
         if (state.getState() == ConversationState.GREETING && matchesBookingIntent(lower)) {
             callStateService.transition(callSid, ConversationState.INTENT_CONFIRMATION);
+            state = callStateService.getOrCreate(callSid);
         }
 
-        // Confirm intent -> show doctor list
         if (state.getState() == ConversationState.INTENT_CONFIRMATION && matchesConfirmation(lower)) {
             callStateService.transition(callSid, ConversationState.DOCTOR_LIST);
+            state = callStateService.getOrCreate(callSid);
         }
 
-        // Doctor selection (e.g. "Dr. Smith" or "the first one")
         if (state.getState() == ConversationState.DOCTOR_LIST) {
-            Doctor selected = matchDoctor(lower, callSid);
+            Doctor selected = matchDoctor(lower);
             if (selected != null) {
                 callStateService.updateSelectedDoctor(callSid, selected.getId());
+                state = callStateService.getOrCreate(callSid);
             }
         }
 
-        // Slot selection (e.g. "tomorrow at 10" or "the first slot")
-        if ((state.getState() == ConversationState.DOCTOR_SELECTED || state.getState() == ConversationState.SLOT_SELECTION)
+        if ((state.getState() == ConversationState.DOCTOR_SELECTED
+                || state.getState() == ConversationState.SLOT_SELECTION)
                 && state.getSelectedDoctorId() != null) {
-            AppointmentSlot slot = matchSlot(lower, callSid);
+
+            AppointmentSlot slot = matchSlot(lower, state.getSelectedDoctorId());
             if (slot != null) {
                 callStateService.updateSelectedSlot(callSid, slot.getId());
+                state = callStateService.getOrCreate(callSid);
             }
         }
 
-        // User details (name, phone)
         if (state.getState() == ConversationState.USER_DETAILS) {
             extractAndSavePatientDetails(callSid, userText, state);
+            state = callStateService.getOrCreate(callSid);
         }
 
-        // Confirmation (yes/no)
         if (state.getState() == ConversationState.CONFIRMATION) {
-            CallStateEntity updated = callStateService.getOrCreate(callSid);
             if (matchesConfirmation(lower)) {
-                SlotService.BookingResult result = slotService.bookAppointment(
-                        updated.getSelectedSlotId(),
-                        updated.getPatientName(),
-                        updated.getPatientPhone());
+                SlotService.BookingResult result =
+                        slotService.bookAppointment(
+                                state.getSelectedSlotId(),
+                                state.getPatientName(),
+                                state.getPatientPhone());
+
                 if (result.success()) {
                     callStateService.transition(callSid, ConversationState.COMPLETED);
                     return BookingFlowResult.bookingSuccess(result.slot());
-                } else {
-                    return BookingFlowResult.bookingConflict(result.message());
                 }
+                return BookingFlowResult.bookingConflict(result.message());
             }
+
             if (matchesRejection(lower)) {
                 callStateService.transition(callSid, ConversationState.SLOT_SELECTION);
             }
         }
 
-        LlmService.LlmContext ctx = buildContext(callSid);
-        String aiText = llmService.generateReplyWithContext(history, ctx);
+        String aiText = llmService.generateReplyWithContext(history, buildContext(callSid));
         return BookingFlowResult.llmReply(aiText);
     }
 
-    private boolean matchesBookingIntent(String text) {
-        return text.contains("book") || text.contains("appointment") || text.contains("schedule")
-                || text.contains("see a doctor") || text.contains("doctor appointment");
+    private boolean matchesBookingIntent(String t) {
+        return t.contains("book") || t.contains("appointment") || t.contains("schedule");
     }
 
-    private Doctor matchDoctor(String text, String callSid) {
-        List<Doctor> doctors = slotService.getActiveDoctors();
-        for (Doctor d : doctors) {
-            if (text.contains(d.getName().toLowerCase())) return d;
-        }
-        if (text.contains("first") || text.contains("one")) return doctors.isEmpty() ? null : doctors.get(0);
-        return null;
+    private Doctor matchDoctor(String text) {
+        return slotService.getActiveDoctors().stream()
+                .filter(d -> text.contains(d.getName().toLowerCase()))
+                .findFirst()
+                .orElse(null);
     }
 
-    private AppointmentSlot matchSlot(String text, String callSid) {
-        CallStateEntity state = callStateService.getOrCreate(callSid);
-        if (state.getSelectedDoctorId() == null) return null;
-        List<AppointmentSlot> slots = slotService.getAvailableSlots(state.getSelectedDoctorId());
-        if (text.contains("first") || text.contains("one")) return slots.isEmpty() ? null : slots.get(0);
+    private AppointmentSlot matchSlot(String text, Long doctorId) {
+        List<AppointmentSlot> slots = slotService.getAvailableSlots(doctorId);
+        if (text.contains("first") && !slots.isEmpty()) return slots.get(0);
+
         for (AppointmentSlot s : slots) {
-            String dateStr = s.getSlotDate().format(DATE_FMT).toLowerCase();
-            String timeStr = s.getStartTime().format(TIME_FMT).toLowerCase();
-            if (text.contains(dateStr) || text.contains(timeStr)) return s;
+            if (text.contains(s.getStartTime().format(TIME_FMT).toLowerCase())) {
+                return s;
+            }
         }
         return null;
     }
 
     private void extractAndSavePatientDetails(String callSid, String userText, CallStateEntity state) {
-        // Simple extraction: assume "My name is X" or "X" and phone digits
         String name = state.getPatientName();
         String phone = state.getPatientPhone();
-        if (name == null && userText.matches("(?i).*my name is\\s+(.+)")) {
-            name = userText.replaceFirst("(?i)my name is\\s+", "").trim();
-            if (name.length() > 100) name = name.substring(0, 100);
-        } else if (name == null && userText.length() > 2 && userText.length() < 80 && !userText.matches(".*\\d{10}.*")) {
+
+        if (name == null && userText.matches("^[A-Za-z ]{3,80}$")) {
             name = userText.trim();
         }
+
         if (phone == null) {
             String digits = userText.replaceAll("\\D", "");
             if (digits.length() >= 10) phone = digits;
         }
+
         if (name != null || phone != null) {
-            callStateService.updatePatientDetails(callSid, name != null ? name : state.getPatientName(), phone != null ? phone : state.getPatientPhone());
+            callStateService.updatePatientDetails(callSid,
+                    name != null ? name : state.getPatientName(),
+                    phone != null ? phone : state.getPatientPhone());
         }
     }
 
-    private boolean matchesConfirmation(String text) {
-        return text.matches("(?i)(yes|yeah|sure|ok|okay|confirm|please|correct)");
+    private boolean matchesConfirmation(String t) {
+        return t.matches("(?i)(yes|yeah|ok|okay|confirm|sure)");
     }
 
-    private boolean matchesRejection(String text) {
-        return text.matches("(?i)(no|nope|cancel|different|other)");
+    private boolean matchesRejection(String t) {
+        return t.matches("(?i)(no|cancel|different|other)");
     }
 
-    /**
-     * Result of processing: either LLM reply or booking outcome.
-     */
-    public record BookingFlowResult(String aiText, boolean bookingSuccess, boolean bookingConflict, AppointmentSlot bookedSlot) {
+    public record BookingFlowResult(
+            String aiText,
+            boolean bookingSuccess,
+            boolean bookingConflict,
+            AppointmentSlot bookedSlot
+    ) {
         public static BookingFlowResult llmReply(String text) {
             return new BookingFlowResult(text, false, false, null);
         }

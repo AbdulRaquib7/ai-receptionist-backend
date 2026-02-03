@@ -1,7 +1,7 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.entity.ChatMessage;
-import com.ai.receptionist.entity.ConversationState;
+import com.ai.receptionist.utils.ConversationState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -96,8 +96,9 @@ public class LlmService {
             return root.path("choices").path(0).path("message").path("content").asText("").trim();
         } catch (Exception ex) {
             log.error("Failed to get LLM reply", ex);
-            return "";
+            return "Sorry, I had trouble understanding that. Could you please repeat?";
         }
+
     }
 
     private String buildSystemPrompt(LlmContext ctx) {

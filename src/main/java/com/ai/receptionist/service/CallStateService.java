@@ -1,8 +1,9 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.entity.CallStateEntity;
-import com.ai.receptionist.entity.ConversationState;
 import com.ai.receptionist.repository.CallStateRepository;
+import com.ai.receptionist.utils.ConversationState;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;

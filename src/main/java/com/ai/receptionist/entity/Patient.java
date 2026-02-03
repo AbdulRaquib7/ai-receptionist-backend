@@ -1,5 +1,7 @@
 package com.ai.receptionist.entity;
 
+import java.time.Instant;
+
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -16,9 +18,15 @@ public class Patient {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
     private String name;
 
-    @Column(name = "phone_number", nullable = false, unique = true)
     private String phoneNumber;
+    
+    private Instant createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        if (createdAt == null) createdAt = Instant.now();
+    }
+
 }

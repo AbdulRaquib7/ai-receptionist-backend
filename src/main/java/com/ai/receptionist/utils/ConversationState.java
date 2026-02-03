@@ -1,4 +1,4 @@
-package com.ai.receptionist.entity;
+package com.ai.receptionist.utils;
 
 /**
  * State machine for doctor appointment booking conversation.
