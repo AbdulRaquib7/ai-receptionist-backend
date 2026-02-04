@@ -40,21 +40,6 @@ public class CallStateEntity {
     @Column(name = "patient_phone")
     private String patientPhone;
 
-    @Column(name = "caller_phone")
-    private String callerPhone;
-
-    @Column(name = "pending_appointment_id")
-    private Long pendingAppointmentId;
-
-    @Column(name = "pending_action")
-    private String pendingAction;
-
-    @Column(name = "reschedule_doctor_id")
-    private Long rescheduleDoctorId;
-
-    @Column(name = "reschedule_slot_id")
-    private Long rescheduleSlotId;
-
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

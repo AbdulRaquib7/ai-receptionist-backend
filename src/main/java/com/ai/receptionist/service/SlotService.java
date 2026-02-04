@@ -162,59 +162,6 @@ public class SlotService {
         return doctorRepository.findById(id);
     }
 
-    /**
-     * Cancel appointment and restore slot.
-     */
-    @Transactional
-    public BookingResult cancelAppointment(Long appointmentId) {
-        Appointment appt = appointmentRepository.findByIdForUpdate(appointmentId).orElse(null);
-        if (appt == null) return BookingResult.notFound("Appointment not found.");
-        if (appt.getStatus() == Appointment.Status.CANCELLED) return BookingResult.conflict("Appointment already cancelled.");
-
-        AppointmentSlot slot = slotRepository.findByIdForUpdate(appt.getSlot().getId());
-        if (slot != null) {
-            slot.setStatus(AppointmentSlot.Status.AVAILABLE);
-            slotRepository.save(slot);
-        }
-        appt.setStatus(Appointment.Status.CANCELLED);
-        appointmentRepository.save(appt);
-        log.info("Cancelled appointment {} for patient {}", appointmentId, appt.getPatient().getPhoneNumber());
-        return BookingResult.success(appt, appt.getSlot());
-    }
-
-    /**
-     * Reschedule: lock new slot, restore old slot, update appointment.
-     */
-    @Transactional
-    public BookingResult rescheduleAppointment(Long appointmentId, Long newSlotId) {
-        Appointment appt = appointmentRepository.findByIdForUpdate(appointmentId).orElse(null);
-        if (appt == null) return BookingResult.notFound("Appointment not found.");
-        if (appt.getStatus() == Appointment.Status.CANCELLED) return BookingResult.conflict("Appointment is cancelled.");
-
-        AppointmentSlot newSlot = slotRepository.findByIdForUpdate(newSlotId);
-        if (newSlot == null) return BookingResult.notFound("Slot not found.");
-        if (newSlot.getStatus() != AppointmentSlot.Status.AVAILABLE) return BookingResult.conflict("Slot no longer available.");
-
-        AppointmentSlot oldSlot = appt.getSlot();
-        oldSlot.setStatus(AppointmentSlot.Status.AVAILABLE);
-        slotRepository.save(oldSlot);
-
-        newSlot.setStatus(AppointmentSlot.Status.BOOKED);
-        slotRepository.save(newSlot);
-
-        appt.setSlot(newSlot);
-        appt.setDoctor(newSlot.getDoctor());
-        appointmentRepository.save(appt);
-
-        log.info("Rescheduled appointment {} to slot {}", appointmentId, newSlotId);
-        return BookingResult.success(appt, newSlot);
-    }
-
-    @Transactional(readOnly = true)
-    public Optional<Appointment> findLatestConfirmedByPhone(String phone) {
-        return appointmentRepository.findFirstByPatient_PhoneNumberAndStatusOrderByIdDesc(phone, Appointment.Status.CONFIRMED);
-    }
-
     public record BookingResult(boolean success, String message, Appointment appointment, AppointmentSlot slot) {
         public static BookingResult success(Appointment a, AppointmentSlot s) {
             return new BookingResult(true, null, a, s);
