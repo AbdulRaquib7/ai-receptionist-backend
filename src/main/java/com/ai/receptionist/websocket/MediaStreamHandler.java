@@ -173,6 +173,11 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 if (flowResult.bookingSuccess() && flowResult.bookedSlot() != null) {
                     AppointmentSlot s = flowResult.bookedSlot();
                     aiText = "Your appointment is confirmed for " + s.getSlotDate() + " at " + s.getStartTime() + " with " + s.getDoctor().getName() + ". Thank you for calling.";
+                } else if (flowResult.cancelSuccess()) {
+                    aiText = "Your appointment has been cancelled. Thank you for calling. Goodbye.";
+                } else if (flowResult.rescheduleSuccess() && flowResult.bookedSlot() != null) {
+                    AppointmentSlot s = flowResult.bookedSlot();
+                    aiText = "Your appointment has been rescheduled to " + s.getSlotDate() + " at " + s.getStartTime() + " with " + s.getDoctor().getName() + ". Thank you for calling.";
                 } else if (flowResult.bookingConflict()) {
                     aiText = flowResult.aiText() != null ? flowResult.aiText() : "Sorry, that slot was just booked. Let me offer you alternative times.";
                 } else {
@@ -183,7 +188,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, aiText);
 
-                boolean endCall = isConversationEnded(aiText, userText) || flowResult.bookingSuccess();
+                boolean endCall = isConversationEnded(aiText, userText)
+                        || flowResult.bookingSuccess() || flowResult.cancelSuccess() || flowResult.rescheduleSuccess();
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }

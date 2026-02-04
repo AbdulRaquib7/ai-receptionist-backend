@@ -74,4 +74,46 @@ public class CallStateService {
         state.setState(newState);
         return repository.save(state);
     }
+
+    @Transactional
+    public void storeCallerPhone(String callSid, String callerPhone) {
+        CallStateEntity state = repository.findByCallSid(callSid).orElse(null);
+        if (state != null) {
+            state.setCallerPhone(callerPhone);
+            repository.save(state);
+        } else {
+            state = CallStateEntity.builder()
+                    .callSid(callSid)
+                    .callerPhone(callerPhone)
+                    .state(ConversationState.GREETING)
+                    .build();
+            repository.save(state);
+        }
+    }
+
+    @Transactional
+    public CallStateEntity setPending(String callSid, Long appointmentId, String action) {
+        CallStateEntity state = getOrCreate(callSid);
+        state.setPendingAppointmentId(appointmentId);
+        state.setPendingAction(action);
+        return repository.save(state);
+    }
+
+    @Transactional
+    public CallStateEntity clearPending(String callSid) {
+        CallStateEntity state = getOrCreate(callSid);
+        state.setPendingAppointmentId(null);
+        state.setPendingAction(null);
+        state.setRescheduleDoctorId(null);
+        state.setRescheduleSlotId(null);
+        return repository.save(state);
+    }
+
+    @Transactional
+    public CallStateEntity setRescheduleSlot(String callSid, Long doctorId, Long slotId) {
+        CallStateEntity state = getOrCreate(callSid);
+        state.setRescheduleDoctorId(doctorId);
+        state.setRescheduleSlotId(slotId);
+        return repository.save(state);
+    }
 }
