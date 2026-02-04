@@ -1,5 +1,6 @@
 package com.ai.receptionist.controller;
 
+import com.ai.receptionist.service.CallStateService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,21 +26,34 @@ public class VoiceController {
     @Value("${twilio.base-url:}")
     private String baseUrl;
 
+    private final CallStateService callStateService;
+
+    public VoiceController(CallStateService callStateService) {
+        this.callStateService = callStateService;
+    }
+
     @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> inbound() {
-        return inboundTwiMl();
+    public ResponseEntity<String> inbound(
+            @RequestParam(value = "CallSid", required = false) String callSid,
+            @RequestParam(value = "From", required = false) String from) {
+        return inboundTwiMl(callSid, from);
     }
 
     @PostMapping(value = "/twilio/voice/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> twilioVoiceInbound() {
-        return inboundTwiMl();
+    public ResponseEntity<String> twilioVoiceInbound(
+            @RequestParam(value = "CallSid", required = false) String callSid,
+            @RequestParam(value = "From", required = false) String from) {
+        return inboundTwiMl(callSid, from);
     }
 
-    private ResponseEntity<String> inboundTwiMl() {
+    private ResponseEntity<String> inboundTwiMl(String callSid, String from) {
+        if (StringUtils.hasText(callSid) && StringUtils.hasText(from)) {
+            callStateService.storeCallerPhone(callSid, from.replaceAll("\\D", ""));
+        }
         String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you?</Say>";
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
-        log.info("Inbound call -> stream to {}", mediaStreamUrl);
+        log.info("Inbound call -> stream to {} | callSid={}", mediaStreamUrl, callSid);
         return ResponseEntity.ok(twiml);
     }
 

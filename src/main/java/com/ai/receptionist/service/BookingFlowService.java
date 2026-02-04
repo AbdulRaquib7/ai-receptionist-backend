@@ -69,13 +69,40 @@ public class BookingFlowService {
                                     .collect(Collectors.joining("\n"));
                 }
             }
-            case USER_DETAILS -> instructions = "Ask for the caller's name and phone number to confirm the booking.";
+            case USER_DETAILS -> instructions = buildUserDetailsInstructions(state);
             case CONFIRMATION -> instructions = "Ask the caller to confirm the booking. Do not assume yes.";
-            case GREETING, COMPLETED -> instructions = "Be friendly. If booking intent, guide to doctor selection.";
+            case CANCEL_CONFIRMATION -> instructions = "Ask the caller to confirm cancellation. Say yes to confirm, no to keep.";
+            case RESCHEDULE_SLOT_SELECTION -> {
+                Long docId = state.getRescheduleDoctorId() != null ? state.getRescheduleDoctorId() : state.getSelectedDoctorId();
+                if (docId != null) {
+                    doctorListText = slotService.getDoctor(docId).map(d -> "Selected: " + d.getName()).orElse(null);
+                    List<AppointmentSlot> slots = slotService.getAvailableSlots(docId);
+                    slotListText = slots.isEmpty() ? "No available slots." : slots.stream().limit(10)
+                            .map(s -> "- " + s.getSlotDate().format(DATE_FMT) + " at " + s.getStartTime().format(TIME_FMT))
+                            .collect(Collectors.joining("\n"));
+                }
+                instructions = "Offer available slots for rescheduling. Only use the provided slot list.";
+            }
+            case RESCHEDULE_CONFIRMATION -> instructions = "Ask to confirm the reschedule. Do not assume yes.";
+            case GREETING, COMPLETED -> instructions = "Be friendly. You can help book, cancel, or reschedule appointments.";
             default -> {}
         }
 
         return new LlmService.LlmContext(cs, instructions, doctorListText, slotListText);
+    }
+
+    private String buildUserDetailsInstructions(CallStateEntity state) {
+        if (state.getCallerPhone() != null && !state.getCallerPhone().isEmpty() && state.getPatientPhone() == null) {
+            String formatted = formatPhoneForSpeech(state.getCallerPhone());
+            return "The caller is from " + formatted + ". Say: I see you're calling from that number. Should I use it? If they say yes, use it. If they say another number, use that. Then ask for their name.";
+        }
+        return "Ask for the caller's name and phone number to confirm the booking.";
+    }
+
+    private static String formatPhoneForSpeech(String digits) {
+        if (digits == null || digits.length() < 10) return digits;
+        if (digits.length() == 10) return digits.replaceFirst("(\\d{3})(\\d{3})(\\d{4})", "$1 $2 $3");
+        return digits.replaceFirst("(\\d{1})(\\d{3})(\\d{3})(\\d{4})", "$1 $2 $3 $4");
     }
 
     /**
@@ -84,6 +111,72 @@ public class BookingFlowService {
     public BookingFlowResult processUtterance(String callSid, String userText, List<ChatMessage> history) {
         CallStateEntity state = callStateService.getOrCreate(callSid);
         String lower = userText.toLowerCase().trim();
+
+        // Intent: cancel
+        if (state.getState() == ConversationState.GREETING && matchesCancelIntent(lower)) {
+            String phone = resolvePatientPhone(state);
+            var appt = slotService.findLatestConfirmedByPhone(phone);
+            if (appt.isEmpty()) {
+                return BookingFlowResult.llmReply("You do not have any active appointment to cancel.");
+            }
+            callStateService.setPending(callSid, appt.get().getId(), "CANCEL");
+            callStateService.transition(callSid, ConversationState.CANCEL_CONFIRMATION);
+        }
+
+        // Intent: reschedule
+        if (state.getState() == ConversationState.GREETING && matchesRescheduleIntent(lower)) {
+            String phone = resolvePatientPhone(state);
+            var appt = slotService.findLatestConfirmedByPhone(phone);
+            if (appt.isEmpty()) {
+                return BookingFlowResult.llmReply("You do not have any appointment to reschedule.");
+            }
+            callStateService.setPending(callSid, appt.get().getId(), "RESCHEDULE");
+            callStateService.setRescheduleSlot(callSid, appt.get().getDoctor().getId(), null);
+            callStateService.transition(callSid, ConversationState.RESCHEDULE_SLOT_SELECTION);
+        }
+
+        // Cancel confirmation
+        if (state.getState() == ConversationState.CANCEL_CONFIRMATION && state.getPendingAppointmentId() != null) {
+            if (matchesConfirmation(lower)) {
+                var result = slotService.cancelAppointment(state.getPendingAppointmentId());
+                callStateService.clearPending(callSid);
+                callStateService.transition(callSid, ConversationState.COMPLETED);
+                if (result.success()) return BookingFlowResult.cancelSuccessResult();
+            }
+            if (matchesRejection(lower)) {
+                callStateService.clearPending(callSid);
+                callStateService.transition(callSid, ConversationState.GREETING);
+                return BookingFlowResult.llmReply("Okay, your appointment was not cancelled. How else can I help?");
+            }
+        }
+
+        // Reschedule slot selection
+        if (state.getState() == ConversationState.RESCHEDULE_SLOT_SELECTION && state.getPendingAppointmentId() != null) {
+            Long docId = state.getRescheduleDoctorId() != null ? state.getRescheduleDoctorId() : state.getSelectedDoctorId();
+            if (docId != null) {
+                AppointmentSlot slot = matchSlot(lower, callSid);
+                if (slot != null) {
+                    callStateService.setRescheduleSlot(callSid, docId, slot.getId());
+                    callStateService.transition(callSid, ConversationState.RESCHEDULE_CONFIRMATION);
+                }
+            }
+        }
+
+        // Reschedule confirmation
+        if (state.getState() == ConversationState.RESCHEDULE_CONFIRMATION && state.getPendingAppointmentId() != null && state.getRescheduleSlotId() != null) {
+            if (matchesConfirmation(lower)) {
+                var result = slotService.rescheduleAppointment(state.getPendingAppointmentId(), state.getRescheduleSlotId());
+                callStateService.clearPending(callSid);
+                callStateService.transition(callSid, ConversationState.COMPLETED);
+                if (result.success()) return BookingFlowResult.rescheduleSuccessResult(result.slot());
+                return BookingFlowResult.bookingConflict(result.message());
+            }
+            if (matchesRejection(lower)) {
+                callStateService.clearPending(callSid);
+                callStateService.transition(callSid, ConversationState.GREETING);
+                return BookingFlowResult.llmReply("Okay, your appointment was not changed. How else can I help?");
+            }
+        }
 
         // Intent: booking
         if (state.getState() == ConversationState.GREETING && matchesBookingIntent(lower)) {
@@ -104,11 +197,18 @@ public class BookingFlowService {
         }
 
         // Slot selection (e.g. "tomorrow at 10" or "the first slot")
-        if ((state.getState() == ConversationState.DOCTOR_SELECTED || state.getState() == ConversationState.SLOT_SELECTION)
-                && state.getSelectedDoctorId() != null) {
+        if ((state.getState() == ConversationState.DOCTOR_SELECTED || state.getState() == ConversationState.SLOT_SELECTION || state.getState() == ConversationState.RESCHEDULE_SLOT_SELECTION)
+                && (state.getSelectedDoctorId() != null || state.getRescheduleDoctorId() != null)) {
             AppointmentSlot slot = matchSlot(lower, callSid);
-            if (slot != null) {
+            if (slot != null && state.getState() != ConversationState.RESCHEDULE_SLOT_SELECTION) {
                 callStateService.updateSelectedSlot(callSid, slot.getId());
+            }
+        }
+
+        // User details (name, phone) - use caller phone if available and user confirms
+        if (state.getState() == ConversationState.USER_DETAILS && state.getCallerPhone() != null && state.getPatientPhone() == null) {
+            if (matchesConfirmation(lower)) {
+                callStateService.updatePatientDetails(callSid, state.getPatientName(), state.getCallerPhone());
             }
         }
 
@@ -147,6 +247,14 @@ public class BookingFlowService {
                 || text.contains("see a doctor") || text.contains("doctor appointment");
     }
 
+    private boolean matchesCancelIntent(String text) {
+        return text.contains("cancel") || (text.contains("appointment") && text.contains("cancel"));
+    }
+
+    private boolean matchesRescheduleIntent(String text) {
+        return text.contains("reschedule") || (text.contains("change") && text.contains("appointment"));
+    }
+
     private Doctor matchDoctor(String text, String callSid) {
         List<Doctor> doctors = slotService.getActiveDoctors();
         for (Doctor d : doctors) {
@@ -156,10 +264,16 @@ public class BookingFlowService {
         return null;
     }
 
+    private String resolvePatientPhone(CallStateEntity state) {
+        if (state.getPatientPhone() != null && !state.getPatientPhone().isEmpty()) return state.getPatientPhone();
+        return state.getCallerPhone() != null ? state.getCallerPhone() : "";
+    }
+
     private AppointmentSlot matchSlot(String text, String callSid) {
         CallStateEntity state = callStateService.getOrCreate(callSid);
-        if (state.getSelectedDoctorId() == null) return null;
-        List<AppointmentSlot> slots = slotService.getAvailableSlots(state.getSelectedDoctorId());
+        Long docId = state.getSelectedDoctorId() != null ? state.getSelectedDoctorId() : state.getRescheduleDoctorId();
+        if (docId == null) return null;
+        List<AppointmentSlot> slots = slotService.getAvailableSlots(docId);
         if (text.contains("first") || text.contains("one")) return slots.isEmpty() ? null : slots.get(0);
         for (AppointmentSlot s : slots) {
             String dateStr = s.getSlotDate().format(DATE_FMT).toLowerCase();
@@ -197,17 +311,23 @@ public class BookingFlowService {
     }
 
     /**
-     * Result of processing: either LLM reply or booking outcome.
+     * Result of processing: either LLM reply or booking/cancel/reschedule outcome.
      */
-    public record BookingFlowResult(String aiText, boolean bookingSuccess, boolean bookingConflict, AppointmentSlot bookedSlot) {
+    public record BookingFlowResult(String aiText, boolean bookingSuccess, boolean bookingConflict, boolean cancelSuccess, boolean rescheduleSuccess, AppointmentSlot bookedSlot) {
         public static BookingFlowResult llmReply(String text) {
-            return new BookingFlowResult(text, false, false, null);
+            return new BookingFlowResult(text, false, false, false, false, null);
         }
         public static BookingFlowResult bookingSuccess(AppointmentSlot slot) {
-            return new BookingFlowResult(null, true, false, slot);
+            return new BookingFlowResult(null, true, false, false, false, slot);
         }
         public static BookingFlowResult bookingConflict(String message) {
-            return new BookingFlowResult(message, false, true, null);
+            return new BookingFlowResult(message, false, true, false, false, null);
+        }
+        public static BookingFlowResult cancelSuccessResult() {
+            return new BookingFlowResult(null, false, false, true, false, null);
+        }
+        public static BookingFlowResult rescheduleSuccessResult(AppointmentSlot slot) {
+            return new BookingFlowResult(null, false, false, false, true, slot);
         }
     }
 }
