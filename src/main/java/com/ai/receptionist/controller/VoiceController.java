@@ -48,12 +48,15 @@ public class VoiceController {
 
     private ResponseEntity<String> inboundTwiMl(String callSid, String from) {
         if (StringUtils.hasText(callSid) && StringUtils.hasText(from)) {
-            callStateService.storeCallerPhone(callSid, from.replaceAll("\\D", ""));
+            String digits = from.replaceAll("\\D", "");
+            callStateService.storeCallerPhone(callSid, digits);
+            log.info("Inbound call -> stream to {} | callSid={} from={}", mediaStreamUrl, callSid, from);
+        } else {
+            log.info("Inbound call -> stream to {} | callSid={}", mediaStreamUrl, callSid);
         }
         String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you?</Say>";
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
-        log.info("Inbound call -> stream to {} | callSid={}", mediaStreamUrl, callSid);
         return ResponseEntity.ok(twiml);
     }
 

@@ -7,8 +7,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -89,7 +93,18 @@ public class BookingFlowService {
                 instructions = "Offer available slots for rescheduling. Only use the provided slot list.";
             }
             case RESCHEDULE_CONFIRMATION -> instructions = "Ask to confirm the reschedule. Do not assume yes.";
-            case GREETING, COMPLETED -> instructions = "Be friendly. You can help book, cancel, or reschedule appointments.";
+            case GREETING, COMPLETED -> {
+                List<Doctor> doctors = slotService.getActiveDoctors();
+                doctorListText = doctors.isEmpty()
+                        ? null
+                        : doctors.stream()
+                                .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
+                                .collect(Collectors.joining("\n"));
+                instructions = "Be friendly. You can help book, cancel, or reschedule appointments. "
+                        + (doctorListText != null
+                                ? "If the caller asks for doctors, specializations, or doctor list, share the available doctors: " + doctorListText.replace("\n", " ") + ". Never say no doctors unless the list is empty."
+                                : "If asked about doctors, say you'll look them up and ask what they need.");
+            }
             default -> {}
         }
 
@@ -305,21 +320,69 @@ public class BookingFlowService {
         return state.getCallerPhone() != null ? state.getCallerPhone() : "";
     }
 
+    private static final Pattern TIME_PATTERN = Pattern.compile("(\\d{1,2})[.:\\s]*(\\d{2})(?:\\s*(?:to|and|-)\\s*(\\d{1,2})[.:\\s]*(\\d{2}))?");
+
     private AppointmentSlot matchSlot(String text, String callSid) {
         CallStateEntity state = callStateService.getOrCreate(callSid);
         Long docId = state.getSelectedDoctorId() != null ? state.getSelectedDoctorId() : state.getRescheduleDoctorId();
         if (docId == null) return null;
         List<AppointmentSlot> slots = slotService.getAvailableSlots(docId);
-        if (text.contains("first") || text.contains("one") || text.contains("first one")) return slots.isEmpty() ? null : slots.get(0);
+        if (slots.isEmpty()) return null;
+        if (text.contains("first") || text.contains("one") || text.contains("first one")) return slots.get(0);
+
         LocalDate today = LocalDate.now();
+        List<LocalTime> parsedTimes = parseTimesFromText(text);
+
         for (AppointmentSlot s : slots) {
             String dateStr = s.getSlotDate().format(DATE_FMT).toLowerCase();
             String timeStr = s.getStartTime().format(TIME_FMT).toLowerCase();
             if (text.contains(dateStr) || text.contains(timeStr)) return s;
             if (text.contains("today") && s.getSlotDate().equals(today)) return s;
             if (text.contains("tomorrow") && s.getSlotDate().equals(today.plusDays(1))) return s;
+            for (LocalTime pt : parsedTimes) {
+                if (s.getStartTime().equals(pt)) return s;
+            }
         }
         return null;
+    }
+
+    /**
+     * Parse time expressions like "5.30", "5:30", "5 30", "5.30 to 6.30" into 24h LocalTime.
+     * Hours 1-7 without AM/PM are assumed PM (e.g. 5.30 -> 17:30).
+     */
+    private List<LocalTime> parseTimesFromText(String text) {
+        List<LocalTime> result = new ArrayList<>();
+        Matcher m = TIME_PATTERN.matcher(text);
+        while (m.find()) {
+            int h1 = Integer.parseInt(m.group(1));
+            int min1 = Integer.parseInt(m.group(2));
+            LocalTime t1 = to24h(h1, min1);
+            if (t1 != null) result.add(t1);
+            if (m.group(3) != null && m.group(4) != null) {
+                int h2 = Integer.parseInt(m.group(3));
+                int min2 = Integer.parseInt(m.group(4));
+                LocalTime t2 = to24h(h2, min2);
+                if (t2 != null) result.add(t2);
+            }
+        }
+        return result;
+    }
+
+    private LocalTime to24h(int hour12, int minute) {
+        if (minute < 0 || minute > 59) return null;
+        int h24;
+        if (hour12 >= 1 && hour12 <= 7) {
+            h24 = hour12 + 12;
+        } else if (hour12 >= 8 && hour12 <= 12) {
+            h24 = hour12 == 12 ? 12 : hour12;
+        } else {
+            return null;
+        }
+        try {
+            return LocalTime.of(h24, minute);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void extractAndSavePatientDetails(String callSid, String userText, CallStateEntity state) {
