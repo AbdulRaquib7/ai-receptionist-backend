@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -53,6 +54,7 @@ public class BookingFlowService {
                         : doctors.stream()
                                 .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
                                 .collect(Collectors.joining("\n"));
+                instructions = "List the available doctors and ask which one they prefer. Never say no doctors unless the list says 'No doctors available'.";
             }
             case DOCTOR_SELECTED, SLOT_SELECTION -> {
                 Long docId = state.getSelectedDoctorId();
@@ -67,6 +69,9 @@ public class BookingFlowService {
                                     .limit(10)
                                     .map(s -> "- " + s.getSlotDate().format(DATE_FMT) + " at " + s.getStartTime().format(TIME_FMT))
                                     .collect(Collectors.joining("\n"));
+                    instructions = slots.isEmpty()
+                            ? "Apologize and say no slots are available for this doctor in the next 7 days."
+                            : "Clearly offer these available slots. Say 'We have openings on...' and list them. Ask which date and time works best. Never say slots are unavailable unless the list says 'No available slots'.";
                 }
             }
             case USER_DETAILS -> instructions = buildUserDetailsInstructions(state);
@@ -259,9 +264,40 @@ public class BookingFlowService {
         List<Doctor> doctors = slotService.getActiveDoctors();
         for (Doctor d : doctors) {
             if (text.contains(d.getName().toLowerCase())) return d;
+            if (matchesDoctorFuzzy(text, d)) return d;
         }
-        if (text.contains("first") || text.contains("one")) return doctors.isEmpty() ? null : doctors.get(0);
+        if (text.contains("first") || text.contains("one") || text.contains("first one")) return doctors.isEmpty() ? null : doctors.get(0);
         return null;
+    }
+
+    private boolean matchesDoctorFuzzy(String text, Doctor d) {
+        String name = d.getName().toLowerCase().replaceAll("dr\\.?\\s*", "");
+        String spec = d.getSpecialization().toLowerCase();
+        String[] parts = name.split("\\s+");
+        if (parts.length >= 2) {
+            String firstName = parts[0];
+            String lastName = parts[parts.length - 1];
+            boolean hasFirst = text.contains(firstName);
+            String alt = soundAlike(lastName);
+            boolean hasLast = text.contains(lastName) || (alt != null && text.contains(alt));
+            if (hasFirst && hasLast) return true;
+        }
+        if (text.contains("heart") && spec.contains("cardiol")) return true;
+        if (text.contains("general") && spec.contains("general")) return true;
+        if (text.contains("pediatr") && spec.contains("pediatr")) return true;
+        return false;
+    }
+
+    private String soundAlike(String name) {
+        return switch (name) {
+            case "chen" -> "chan";
+            case "chan" -> "chen";
+            case "johnson" -> "johnsen";
+            case "johnsen" -> "johnson";
+            case "davis" -> "davies";
+            case "davies" -> "davis";
+            default -> null;
+        };
     }
 
     private String resolvePatientPhone(CallStateEntity state) {
@@ -274,11 +310,14 @@ public class BookingFlowService {
         Long docId = state.getSelectedDoctorId() != null ? state.getSelectedDoctorId() : state.getRescheduleDoctorId();
         if (docId == null) return null;
         List<AppointmentSlot> slots = slotService.getAvailableSlots(docId);
-        if (text.contains("first") || text.contains("one")) return slots.isEmpty() ? null : slots.get(0);
+        if (text.contains("first") || text.contains("one") || text.contains("first one")) return slots.isEmpty() ? null : slots.get(0);
+        LocalDate today = LocalDate.now();
         for (AppointmentSlot s : slots) {
             String dateStr = s.getSlotDate().format(DATE_FMT).toLowerCase();
             String timeStr = s.getStartTime().format(TIME_FMT).toLowerCase();
             if (text.contains(dateStr) || text.contains(timeStr)) return s;
+            if (text.contains("today") && s.getSlotDate().equals(today)) return s;
+            if (text.contains("tomorrow") && s.getSlotDate().equals(today.plusDays(1))) return s;
         }
         return null;
     }
@@ -303,7 +342,9 @@ public class BookingFlowService {
     }
 
     private boolean matchesConfirmation(String text) {
-        return text.matches("(?i)(yes|yeah|sure|ok|okay|confirm|please|correct)");
+        if (text.matches("(?i)(yes|yeah|sure|ok|okay|confirm|please|correct)")) return true;
+        if (text.trim().equalsIgnoreCase("you") && text.length() <= 5) return true;
+        return false;
     }
 
     private boolean matchesRejection(String text) {

@@ -96,7 +96,7 @@ public class LlmService {
             return root.path("choices").path(0).path("message").path("content").asText("").trim();
         } catch (Exception ex) {
             log.error("Failed to get LLM reply", ex);
-            return "";
+            return "I'm sorry, I'm having a technical issue. Please try again in a moment.";
         }
     }
 
