@@ -161,7 +161,10 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 }
 
                 String userText = sttService.transcribe(audio);
-                if (StringUtils.isBlank(userText) || userText.length() < 5) return;
+                if (StringUtils.isBlank(userText) || userText.length() < 5) {
+                    twilioService.speakResponse(callSid, "I'm sorry, I'm having a technical issue. Please try again.", false);
+                    return;
+                }
 
                 log.info("USER | {}", userText);
                 conversationStore.appendUser(callSid, userText);

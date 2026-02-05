@@ -38,7 +38,7 @@ public class LlmService {
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    @Value("${openai.api-key}")
+    @Value("${OPENAI_API_KEY:${openai.api-key:}}")
     private String openAiApiKey;
 
     @Value("${openai.model:gpt-4o-mini}")

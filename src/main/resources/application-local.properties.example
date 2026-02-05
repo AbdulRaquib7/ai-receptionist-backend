@@ -1,4 +1,7 @@
-# Option 1: Copy to application-local.properties, add your key, then run: mvn spring-boot:run -Dspring.profiles.active=local
-# Option 2: Run with env var: OPENAI_API_KEY=sk-your-key mvn spring-boot:run
-# Get key at https://platform.openai.com/api-keys (401 = key expired/invalid)
+# Copy to application-local.properties and add your OpenAI key.
+# Run with: mvn spring-boot:run -Dspring.profiles.active=local
+#
+# Alternatively use env (recommended): OPENAI_API_KEY=sk-xxx mvn spring-boot:run
+# Env var overrides file - avoids token overwrite on deploy.
+
 openai.api-key=sk-your-valid-openai-api-key-here

@@ -36,7 +36,7 @@ public class SttService {
     private RestTemplate restTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Value("${openai.api-key:${OPENAI_API_KEY:}}")
+    @Value("${OPENAI_API_KEY:${openai.api-key:}}")
     private String openAiApiKey;
 
     @Value("${stt.connect-timeout:30s}")
