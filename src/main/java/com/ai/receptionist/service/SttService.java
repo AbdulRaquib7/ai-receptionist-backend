@@ -36,7 +36,7 @@ public class SttService {
     private RestTemplate restTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Value("${OPENAI_API_KEY:${openai.api-key:}}")
+    @Value("${openai.api-key:${OPENAI_API_KEY:}}")
     private String openAiApiKey;
 
     @Value("${stt.connect-timeout:30s}")
@@ -53,6 +53,7 @@ public class SttService {
 
     @jakarta.annotation.PostConstruct
     private void init() {
+        if (openAiApiKey != null) openAiApiKey = openAiApiKey.trim();
         this.restTemplate = new RestTemplateBuilder()
                 .setConnectTimeout(connectTimeout)
                 .setReadTimeout(readTimeout)

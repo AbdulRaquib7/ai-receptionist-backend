@@ -38,7 +38,7 @@ public class LlmService {
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    @Value("${OPENAI_API_KEY:${openai.api-key:}}")
+    @Value("${openai.api-key:${OPENAI_API_KEY:}}")
     private String openAiApiKey;
 
     @Value("${openai.model:gpt-4o-mini}")
@@ -46,6 +46,14 @@ public class LlmService {
 
     public LlmService(RestTemplateBuilder builder) {
         this.restTemplate = builder.build();
+    }
+
+    @jakarta.annotation.PostConstruct
+    private void init() {
+        if (openAiApiKey != null) openAiApiKey = openAiApiKey.trim();
+        if (StringUtils.isBlank(openAiApiKey) || !openAiApiKey.startsWith("sk-")) {
+            log.warn("OpenAI API key missing or invalid format. 401 errors will occur.");
+        }
     }
 
     public String generateReply(List<ChatMessage> history) {
