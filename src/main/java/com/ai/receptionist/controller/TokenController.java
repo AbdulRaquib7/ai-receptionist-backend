@@ -32,7 +32,7 @@ public class TokenController {
     @GetMapping("/token")
     public Map<String, String> token() {
         VoiceGrant grant = new VoiceGrant();
-        grant.setOutgoingApplicationSid("APXXXXXXXXXXXXXXXXXXXXXXXX");
+        grant.setOutgoingApplicationSid("APfb98e926896212a5575c4f905c356c84");
 
         AccessToken token = new AccessToken.Builder(
                 accountSid,
@@ -42,5 +42,7 @@ public class TokenController {
 
         return Map.of("token", token.toJwt());
     }
+    
+
 }
 

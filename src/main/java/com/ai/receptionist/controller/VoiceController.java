@@ -91,4 +91,27 @@ public class VoiceController {
             .replace("\"", "&quot;")
             .replace("'", "&apos;");
     }
+    
+    @PostMapping(value = "/voice", produces = MediaType.APPLICATION_XML_VALUE)
+    public String voice() {
+        return "<Response>"
+             + "  <Connect>"
+             + "    <Stream url=\"wss://cristobal-unpawned-cherie.ngrok-free.dev/media-stream\"/>"
+             + "  </Connect>"
+             + "  <Redirect>/continue-call</Redirect>"
+             + "</Response>";
+    }
+
+    @PostMapping(
+    		  value = "/twilio/voice/say",
+    		  produces = MediaType.APPLICATION_XML_VALUE
+    		)
+    		public String say(@RequestParam String text) {
+    		    return "<Response>"
+    		         + "<Say voice=\"alice\">" + text + "</Say>"
+    		         + "<Redirect>/continue-call</Redirect>"
+    		         + "</Response>";
+    		}
+
+
 }

@@ -69,6 +69,12 @@
 			<artifactId>Java-WebSocket</artifactId>
 			<version>1.5.4</version>
 		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+		</dependency>
+
+
 
     </dependencies>
 
