@@ -42,6 +42,13 @@ public class CallStateService {
     }
 
     @Transactional
+    public CallStateEntity setSelectedSpecialization(String callSid, String specialization) {
+        CallStateEntity state = getOrCreate(callSid);
+        state.setSelectedSpecialization(specialization);
+        return repository.save(state);
+    }
+
+    @Transactional
     public CallStateEntity updateSelectedDoctor(String callSid, Long doctorId) {
         CallStateEntity state = getOrCreate(callSid);
         state.setSelectedDoctorId(doctorId);
@@ -72,6 +79,9 @@ public class CallStateService {
     public CallStateEntity transition(String callSid, ConversationState newState) {
         CallStateEntity state = getOrCreate(callSid);
         state.setState(newState);
+        if (newState == ConversationState.SPECIALIZATION_ASK) {
+            state.setSelectedSpecialization(null);
+        }
         return repository.save(state);
     }
 

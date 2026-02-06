@@ -51,14 +51,23 @@ public class BookingFlowService {
 
         switch (cs) {
             case INTENT_CONFIRMATION -> instructions = "Ask if they would like to book a doctor appointment.";
+            case SPECIALIZATION_ASK -> {
+                List<String> specializations = slotService.getActiveDoctors().stream()
+                        .map(Doctor::getSpecialization)
+                        .distinct()
+                        .toList();
+                doctorListText = specializations.isEmpty() ? null
+                        : specializations.stream().map(s -> "- " + s).collect(Collectors.joining("\n"));
+                instructions = "Ask which specialization they need. List these options: " + String.join(", ", specializations) + ". Say 'Which specialization do you need? We have Cardiology, General Practice, Pediatrics (or whatever is in the list).'";
+            }
             case DOCTOR_LIST -> {
-                List<Doctor> doctors = slotService.getActiveDoctors();
+                List<Doctor> doctors = getDoctorsForContext(state);
                 doctorListText = doctors.isEmpty()
                         ? "No doctors available."
                         : doctors.stream()
                                 .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
                                 .collect(Collectors.joining("\n"));
-                instructions = "You MUST list the available doctors above and ask which one they prefer. Say 'We have Dr. X (specialization), Dr. Y... Which would you like?' Never say you cannot provide the list.";
+                instructions = "You MUST list the available doctors above and ask which one they prefer. Say 'For " + (state.getSelectedSpecialization() != null ? state.getSelectedSpecialization() : "your selection") + ", we have Dr. X, Dr. Y... Which would you like?' Never say you cannot provide the list.";
             }
             case DOCTOR_SELECTED, SLOT_SELECTION -> {
                 Long docId = state.getSelectedDoctorId();
@@ -204,14 +213,23 @@ public class BookingFlowService {
             callStateService.transition(callSid, ConversationState.INTENT_CONFIRMATION);
         }
 
-        // Confirm intent -> show doctor list
+        // Confirm intent -> ask specialization
         if (state.getState() == ConversationState.INTENT_CONFIRMATION && matchesConfirmation(lower)) {
-            callStateService.transition(callSid, ConversationState.DOCTOR_LIST);
+            callStateService.transition(callSid, ConversationState.SPECIALIZATION_ASK);
         }
 
-        // Doctor selection (e.g. "Dr. Smith" or "the first one")
+        // Specialization selection (e.g. "Cardiology", "General Practice")
+        if (state.getState() == ConversationState.SPECIALIZATION_ASK) {
+            String matched = matchSpecialization(lower, callSid);
+            if (matched != null) {
+                callStateService.setSelectedSpecialization(callSid, matched);
+                callStateService.transition(callSid, ConversationState.DOCTOR_LIST);
+            }
+        }
+
+        // Doctor selection (e.g. "Dr. Smith" or "the first one") - only from doctors matching selected specialization
         if (state.getState() == ConversationState.DOCTOR_LIST) {
-            Doctor selected = matchDoctor(lower, callSid);
+            Doctor selected = matchDoctor(lower, callSid, state);
             if (selected != null) {
                 callStateService.updateSelectedDoctor(callSid, selected.getId());
             }
@@ -290,8 +308,29 @@ public class BookingFlowService {
         return text.contains("reschedule") || (text.contains("change") && text.contains("appointment"));
     }
 
-    private Doctor matchDoctor(String text, String callSid) {
+    private List<Doctor> getDoctorsForContext(CallStateEntity state) {
+        List<Doctor> all = slotService.getActiveDoctors();
+        String spec = state.getSelectedSpecialization();
+        if (spec == null || spec.isBlank()) return all;
+        return all.stream()
+                .filter(d -> d.getSpecialization() != null && d.getSpecialization().equalsIgnoreCase(spec))
+                .toList();
+    }
+
+    private String matchSpecialization(String text, String callSid) {
         List<Doctor> doctors = slotService.getActiveDoctors();
+        for (Doctor d : doctors) {
+            String spec = d.getSpecialization();
+            if (spec != null && text.contains(spec.toLowerCase())) return spec;
+        }
+        if (text.contains("cardio") || text.contains("heart")) return "Cardiology";
+        if (text.contains("general") || text.contains("gp")) return "General Practice";
+        if (text.contains("pediatr") || text.contains("child")) return "Pediatrics";
+        return null;
+    }
+
+    private Doctor matchDoctor(String text, String callSid, CallStateEntity state) {
+        List<Doctor> doctors = getDoctorsForContext(state);
         for (Doctor d : doctors) {
             if (text.contains(d.getName().toLowerCase())) return d;
             if (matchesDoctorFuzzy(text, d)) return d;

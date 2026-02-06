@@ -6,6 +6,7 @@ package com.ai.receptionist.entity;
 public enum ConversationState {
     GREETING,
     INTENT_CONFIRMATION,
+    SPECIALIZATION_ASK,
     DOCTOR_LIST,
     DOCTOR_SELECTED,
     SLOT_SELECTION,

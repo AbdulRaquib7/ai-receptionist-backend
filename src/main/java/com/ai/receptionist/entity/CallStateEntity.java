@@ -28,6 +28,9 @@ public class CallStateEntity {
     @Builder.Default
     private ConversationState state = ConversationState.GREETING;
 
+    @Column(name = "selected_specialization", length = 100)
+    private String selectedSpecialization;
+
     @Column(name = "selected_doctor_id")
     private Long selectedDoctorId;
 
