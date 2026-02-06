@@ -116,7 +116,9 @@ public class LlmService {
                 sb.append("\n").append(ctx.stateInstructions());
             }
             if (ctx.doctorListText() != null && !ctx.doctorListText().isEmpty()) {
-                sb.append("\n\nUse ONLY these doctors when listing or discussing:\n").append(ctx.doctorListText());
+                sb.append("\n\nAVAILABLE DOCTORS (you MUST list these when caller asks for doctors, list, or specializations):\n")
+                  .append(ctx.doctorListText())
+                  .append("\nNever say 'I'm unable to provide' or 'I cannot list' - you have the list above.");
             }
             if (ctx.slotListText() != null && !ctx.slotListText().isEmpty()) {
                 sb.append("\n\nUse ONLY these available slots when offering times:\n").append(ctx.slotListText());

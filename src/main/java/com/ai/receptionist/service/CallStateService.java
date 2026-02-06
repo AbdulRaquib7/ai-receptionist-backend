@@ -45,7 +45,7 @@ public class CallStateService {
     public CallStateEntity updateSelectedDoctor(String callSid, Long doctorId) {
         CallStateEntity state = getOrCreate(callSid);
         state.setSelectedDoctorId(doctorId);
-        state.setState(ConversationState.DOCTOR_SELECTED);
+        state.setState(ConversationState.SLOT_SELECTION);
         return repository.save(state);
     }
 

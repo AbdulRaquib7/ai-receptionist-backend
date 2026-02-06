@@ -58,7 +58,7 @@ public class BookingFlowService {
                         : doctors.stream()
                                 .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
                                 .collect(Collectors.joining("\n"));
-                instructions = "List the available doctors and ask which one they prefer. Never say no doctors unless the list says 'No doctors available'.";
+                instructions = "You MUST list the available doctors above and ask which one they prefer. Say 'We have Dr. X (specialization), Dr. Y... Which would you like?' Never say you cannot provide the list.";
             }
             case DOCTOR_SELECTED, SLOT_SELECTION -> {
                 Long docId = state.getSelectedDoctorId();
@@ -102,7 +102,7 @@ public class BookingFlowService {
                                 .collect(Collectors.joining("\n"));
                 instructions = "Be friendly. You can help book, cancel, or reschedule appointments. "
                         + (doctorListText != null
-                                ? "If the caller asks for doctors, specializations, or doctor list, share the available doctors: " + doctorListText.replace("\n", " ") + ". Never say no doctors unless the list is empty."
+                                ? "If caller asks for doctors, list, or specializations, you MUST list: " + doctorListText.replace("\n", ", ") + ". Never refuse or say you cannot provide the list."
                                 : "If asked about doctors, say you'll look them up and ask what they need.");
             }
             default -> {}
@@ -175,6 +175,7 @@ public class BookingFlowService {
             Long docId = state.getRescheduleDoctorId() != null ? state.getRescheduleDoctorId() : state.getSelectedDoctorId();
             if (docId != null) {
                 AppointmentSlot slot = matchSlot(lower, callSid);
+                if (slot == null && history != null) slot = matchSlotFromHistory(history, callSid);
                 if (slot != null) {
                     callStateService.setRescheduleSlot(callSid, docId, slot.getId());
                     callStateService.transition(callSid, ConversationState.RESCHEDULE_CONFIRMATION);
@@ -220,6 +221,9 @@ public class BookingFlowService {
         if ((state.getState() == ConversationState.DOCTOR_SELECTED || state.getState() == ConversationState.SLOT_SELECTION || state.getState() == ConversationState.RESCHEDULE_SLOT_SELECTION)
                 && (state.getSelectedDoctorId() != null || state.getRescheduleDoctorId() != null)) {
             AppointmentSlot slot = matchSlot(lower, callSid);
+            if (slot == null && history != null) {
+                slot = matchSlotFromHistory(history, callSid);
+            }
             if (slot != null && state.getState() != ConversationState.RESCHEDULE_SLOT_SELECTION) {
                 callStateService.updateSelectedSlot(callSid, slot.getId());
             }
@@ -241,15 +245,26 @@ public class BookingFlowService {
         if (state.getState() == ConversationState.CONFIRMATION) {
             CallStateEntity updated = callStateService.getOrCreate(callSid);
             if (matchesConfirmation(lower)) {
+                Long slotId = updated.getSelectedSlotId();
+                String patientName = updated.getPatientName();
+                String patientPhone = updated.getPatientPhone() != null ? updated.getPatientPhone() : updated.getCallerPhone();
+                if (slotId == null || patientName == null || StringUtils.isBlank(patientPhone)) {
+                    log.warn("Cannot book: slotId={} patientName={} patientPhone={}", slotId, patientName, patientPhone);
+                    if (patientName == null || StringUtils.isBlank(patientPhone)) {
+                        callStateService.transition(callSid, ConversationState.USER_DETAILS);
+                        return BookingFlowResult.llmReply("I need your name and phone number to complete the booking. Could you please provide them?");
+                    }
+                } else {
                 SlotService.BookingResult result = slotService.bookAppointment(
-                        updated.getSelectedSlotId(),
-                        updated.getPatientName(),
-                        updated.getPatientPhone());
+                        slotId,
+                        patientName,
+                        patientPhone);
                 if (result.success()) {
                     callStateService.transition(callSid, ConversationState.COMPLETED);
                     return BookingFlowResult.bookingSuccess(result.slot());
                 } else {
                     return BookingFlowResult.bookingConflict(result.message());
+                }
                 }
             }
             if (matchesRejection(lower)) {
@@ -321,6 +336,23 @@ public class BookingFlowService {
     }
 
     private static final Pattern TIME_PATTERN = Pattern.compile("(\\d{1,2})[.:\\s]*(\\d{2})(?:\\s*(?:to|and|-)\\s*(\\d{1,2})[.:\\s]*(\\d{2}))?");
+
+    /**
+     * Try to match a slot from recent user messages in history (e.g. user said "10.30 to 11.30" before selecting doctor).
+     */
+    private AppointmentSlot matchSlotFromHistory(List<ChatMessage> history, String callSid) {
+        if (history == null || history.isEmpty()) return null;
+        int count = 0;
+        for (int i = history.size() - 1; i >= 0 && count < 5; i--) {
+            ChatMessage m = history.get(i);
+            if ("user".equalsIgnoreCase(m.getRole()) && m.getContent() != null && !m.getContent().isBlank()) {
+                AppointmentSlot s = matchSlot(m.getContent().toLowerCase().trim(), callSid);
+                if (s != null) return s;
+                count++;
+            }
+        }
+        return null;
+    }
 
     private AppointmentSlot matchSlot(String text, String callSid) {
         CallStateEntity state = callStateService.getOrCreate(callSid);
