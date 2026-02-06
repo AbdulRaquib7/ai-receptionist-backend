@@ -50,7 +50,7 @@ public class BookingFlowService {
         String instructions = null;
 
         switch (cs) {
-            case INTENT_CONFIRMATION -> instructions = "Ask if they would like to book a doctor appointment.";
+            case INTENT_CONFIRMATION -> instructions = "Confirm booking intent. Say something like: 'Would you like to book a doctor appointment?' or 'I can help with that. Shall we proceed with booking?'";
             case SPECIALIZATION_ASK -> {
                 List<String> specializations = slotService.getActiveDoctors().stream()
                         .map(Doctor::getSpecialization)
@@ -309,32 +309,34 @@ public class BookingFlowService {
             }
         }
 
-        // Hardcoded: when user asks for doctor list/names, always list them (any state)
-        boolean asksForDoctors = (lower.contains("list") && lower.contains("doctor"))
-                || (lower.contains("doctor") && (lower.contains("name") || lower.contains("names")));
-        if (asksForDoctors) {
-            List<Doctor> docs = state.getState() == ConversationState.DOCTOR_LIST ? getDoctorsForContext(state) : slotService.getActiveDoctors();
-            if (!docs.isEmpty()) {
-                String list = docs.stream().map(d -> d.getName() + " (" + d.getSpecialization() + ")").collect(Collectors.joining(", "));
-                return BookingFlowResult.llmReply("We have " + list + ". Which would you like to book with?");
-            }
-        }
-
-        // Hardcoded response for SPECIALIZATION_ASK when no specialization matched - ensures correct flow
-        if (state.getState() == ConversationState.SPECIALIZATION_ASK) {
-            List<String> specializations = slotService.getActiveDoctors().stream()
-                    .map(Doctor::getSpecialization)
-                    .distinct()
-                    .toList();
-            if (!specializations.isEmpty()) {
-                String specList = String.join(", ", specializations);
-                return BookingFlowResult.llmReply("Which specialization do you need? We have " + specList + ".");
-            }
-        }
-
         LlmService.LlmContext ctx = buildContext(callSid);
         String aiText = llmService.generateReplyWithContext(history, ctx);
+        if (StringUtils.isBlank(aiText)) {
+            aiText = getFallbackReply(callSid);
+        }
         return BookingFlowResult.llmReply(aiText);
+    }
+
+    private String getFallbackReply(String callSid) {
+        CallStateEntity state = callStateService.getOrCreate(callSid);
+        return switch (state.getState()) {
+            case GREETING, COMPLETED -> "How can I help you today?";
+            case INTENT_CONFIRMATION -> "Would you like to book a doctor appointment?";
+            case DOCTOR_SELECTED -> "Which date and time works for you?";
+            case SPECIALIZATION_ASK -> {
+                List<String> specs = slotService.getActiveDoctors().stream()
+                        .map(Doctor::getSpecialization).distinct().toList();
+                yield specs.isEmpty() ? "Which specialization do you need?" : "Which specialization do you need? We have " + String.join(", ", specs) + ".";
+            }
+            case DOCTOR_LIST -> {
+                List<Doctor> docs = getDoctorsForContext(state);
+                yield docs.isEmpty() ? "No doctors available." : "We have " + docs.stream().map(d -> d.getName() + " (" + d.getSpecialization() + ")").collect(Collectors.joining(", ")) + ". Which would you like?";
+            }
+            case SLOT_SELECTION -> "Which date and time works for you?";
+            case USER_DETAILS -> "May I have your name and phone number?";
+            case CONFIRMATION -> "Can you confirm the booking?";
+            default -> "How can I assist you?";
+        };
     }
 
     private boolean matchesBookingIntent(String text) {

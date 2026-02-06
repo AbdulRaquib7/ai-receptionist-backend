@@ -186,7 +186,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 } else {
                     aiText = flowResult.aiText();
                 }
-                if (StringUtils.isBlank(aiText)) return;
+                if (StringUtils.isBlank(aiText)) {
+                    aiText = "I'm sorry, could you please repeat that?";
+                }
 
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, aiText);
