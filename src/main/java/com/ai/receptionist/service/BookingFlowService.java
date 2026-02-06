@@ -56,9 +56,10 @@ public class BookingFlowService {
                         .map(Doctor::getSpecialization)
                         .distinct()
                         .toList();
+                String specList = String.join(", ", specializations);
                 doctorListText = specializations.isEmpty() ? null
                         : specializations.stream().map(s -> "- " + s).collect(Collectors.joining("\n"));
-                instructions = "Ask which specialization they need. List these options: " + String.join(", ", specializations) + ". Say 'Which specialization do you need? We have Cardiology, General Practice, Pediatrics (or whatever is in the list).'";
+                instructions = "CRITICAL: Your ONLY job now is to ask for specialization. Your next response MUST be: 'Which specialization do you need? We have " + specList + ".' Do NOT ask for time or anything else. Only ask for specialization.";
             }
             case DOCTOR_LIST -> {
                 List<Doctor> doctors = getDoctorsForContext(state);
@@ -87,8 +88,14 @@ public class BookingFlowService {
                             : "Clearly offer these available slots. Say 'We have openings on...' and list them. Ask which date and time works best. Never say slots are unavailable unless the list says 'No available slots'.";
                 }
             }
-            case USER_DETAILS -> instructions = buildUserDetailsInstructions(state);
-            case CONFIRMATION -> instructions = "Ask the caller to confirm the booking. Do not assume yes.";
+            case USER_DETAILS -> {
+                doctorListText = buildDoctorListForAllStates();
+                instructions = buildUserDetailsInstructions(state);
+            }
+            case CONFIRMATION -> {
+                doctorListText = buildDoctorListForAllStates();
+                instructions = "Ask the caller to confirm the booking. Do not assume yes.";
+            }
             case CANCEL_CONFIRMATION -> instructions = "Ask the caller to confirm cancellation. Say yes to confirm, no to keep.";
             case RESCHEDULE_SLOT_SELECTION -> {
                 Long docId = state.getRescheduleDoctorId() != null ? state.getRescheduleDoctorId() : state.getSelectedDoctorId();
@@ -103,21 +110,24 @@ public class BookingFlowService {
             }
             case RESCHEDULE_CONFIRMATION -> instructions = "Ask to confirm the reschedule. Do not assume yes.";
             case GREETING, COMPLETED -> {
-                List<Doctor> doctors = slotService.getActiveDoctors();
-                doctorListText = doctors.isEmpty()
-                        ? null
-                        : doctors.stream()
-                                .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
-                                .collect(Collectors.joining("\n"));
+                doctorListText = buildDoctorListForAllStates();
                 instructions = "Be friendly. You can help book, cancel, or reschedule appointments. "
                         + (doctorListText != null
-                                ? "If caller asks for doctors, list, or specializations, you MUST list: " + doctorListText.replace("\n", ", ") + ". Never refuse or say you cannot provide the list."
-                                : "If asked about doctors, say you'll look them up and ask what they need.");
+                                ? "CRITICAL: When caller asks for doctors, names, or list, you MUST respond with the exact list: " + doctorListText.replace("\n", " | ") + ". Never say you cannot provide the list."
+                                : "If asked about doctors, say you'll look them up.");
             }
             default -> {}
         }
 
         return new LlmService.LlmContext(cs, instructions, doctorListText, slotListText);
+    }
+
+    private String buildDoctorListForAllStates() {
+        List<Doctor> doctors = slotService.getActiveDoctors();
+        return doctors.isEmpty() ? null
+                : doctors.stream()
+                        .map(d -> d.getName() + " (" + d.getSpecialization() + ")")
+                        .collect(Collectors.joining(", "));
     }
 
     private String buildUserDetailsInstructions(CallStateEntity state) {
@@ -287,6 +297,29 @@ public class BookingFlowService {
             }
             if (matchesRejection(lower)) {
                 callStateService.transition(callSid, ConversationState.SLOT_SELECTION);
+            }
+        }
+
+        // Hardcoded: when user asks for doctor list/names, always list them (any state)
+        boolean asksForDoctors = (lower.contains("list") && lower.contains("doctor"))
+                || (lower.contains("doctor") && (lower.contains("name") || lower.contains("names")));
+        if (asksForDoctors) {
+            List<Doctor> docs = state.getState() == ConversationState.DOCTOR_LIST ? getDoctorsForContext(state) : slotService.getActiveDoctors();
+            if (!docs.isEmpty()) {
+                String list = docs.stream().map(d -> d.getName() + " (" + d.getSpecialization() + ")").collect(Collectors.joining(", "));
+                return BookingFlowResult.llmReply("We have " + list + ". Which would you like to book with?");
+            }
+        }
+
+        // Hardcoded response for SPECIALIZATION_ASK when no specialization matched - ensures correct flow
+        if (state.getState() == ConversationState.SPECIALIZATION_ASK) {
+            List<String> specializations = slotService.getActiveDoctors().stream()
+                    .map(Doctor::getSpecialization)
+                    .distinct()
+                    .toList();
+            if (!specializations.isEmpty()) {
+                String specList = String.join(", ", specializations);
+                return BookingFlowResult.llmReply("Which specialization do you need? We have " + specList + ".");
             }
         }
 

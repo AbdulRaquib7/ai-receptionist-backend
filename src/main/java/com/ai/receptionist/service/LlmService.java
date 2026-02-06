@@ -93,7 +93,7 @@ public class LlmService {
 
         Map<String, Object> body = new HashMap<>();
         body.put("model", openAiModel);
-        body.put("temperature", 0.3);
+        body.put("temperature", 0.1);
         body.put("messages", messages);
 
         try {
@@ -111,14 +111,14 @@ public class LlmService {
     private String buildSystemPrompt(LlmContext ctx) {
         StringBuilder sb = new StringBuilder(BASE_SYSTEM_PROMPT);
         if (ctx != null) {
-            sb.append("\n\nCurrent state: ").append(ctx.state());
             if (ctx.stateInstructions() != null && !ctx.stateInstructions().isEmpty()) {
-                sb.append("\n").append(ctx.stateInstructions());
+                sb.append("\n\n").append(ctx.stateInstructions());
             }
+            sb.append("\n\nCurrent state: ").append(ctx.state());
             if (ctx.doctorListText() != null && !ctx.doctorListText().isEmpty()) {
-                sb.append("\n\nAVAILABLE DOCTORS (you MUST list these when caller asks for doctors, list, or specializations):\n")
+                sb.append("\n\nAVAILABLE DOCTORS - When caller asks for doctors, names, or list, you MUST say: ")
                   .append(ctx.doctorListText())
-                  .append("\nNever say 'I'm unable to provide' or 'I cannot list' - you have the list above.");
+                  .append("\nNEVER refuse to list doctors. You have the list.");
             }
             if (ctx.slotListText() != null && !ctx.slotListText().isEmpty()) {
                 sb.append("\n\nUse ONLY these available slots when offering times:\n").append(ctx.slotListText());
