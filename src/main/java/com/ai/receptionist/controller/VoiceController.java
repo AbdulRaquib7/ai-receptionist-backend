@@ -38,23 +38,41 @@ public class VoiceController {
         return ResponseEntity.ok(twiml);
     }
 
-    @RequestMapping(value = "/twilio/voice/say", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> say(
-            @RequestParam("text") String text,
-            @RequestParam(value = "end", required = false) String end) {
-        if (!StringUtils.hasText(text)) {
-            return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
-        }
-        boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
-        String redirectPath = endCall ? "/twilio/voice/goodbye" : "/twilio/voice/continue-call";
-        String redirectUrl = StringUtils.hasText(baseUrl)
-            ? baseUrl.trim().replaceAll("/$", "") + redirectPath
-            : redirectPath;
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
-        String redirectTwiml = "<Redirect>" + escapeXml(redirectUrl) + "</Redirect>";
-        String twiml = "<Response>" + sayTwiml + redirectTwiml + "</Response>";
-        return ResponseEntity.ok(twiml);
-    }
+//    @RequestMapping(value = "/twilio/voice/say", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
+//    public ResponseEntity<String> say(
+//            @RequestParam("text") String text,
+//            @RequestParam(value = "end", required = false) String end) {
+//        if (!StringUtils.hasText(text)) {
+//            return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
+//        }
+//        boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
+//        String redirectPath = endCall ? "/twilio/voice/goodbye" : "/twilio/voice/continue-call";
+//        String redirectUrl = StringUtils.hasText(baseUrl)
+//            ? baseUrl.trim().replaceAll("/$", "") + redirectPath
+//            : redirectPath;
+//        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
+//        String redirectTwiml = "<Redirect>" + escapeXml(redirectUrl) + "</Redirect>";
+//        String twiml = "<Response>" + sayTwiml + redirectTwiml + "</Response>";
+//        return ResponseEntity.ok(twiml);
+//    }
+    
+    @RequestMapping(
+    		  value = "/twilio/voice/say",
+    		  method = {RequestMethod.GET, RequestMethod.POST},
+    		  produces = MediaType.APPLICATION_XML_VALUE
+    		)
+    		public ResponseEntity<String> say(
+    		        @RequestParam("text") String text) {
+
+    		    String twiml =
+    		        "<Response>" +
+    		        "<Say>" + escapeXml(text) + "</Say>" +
+    		        "<Redirect>/twilio/voice/continue-call</Redirect>" +
+    		        "</Response>";
+
+    		    return ResponseEntity.ok(twiml);
+    		}
+
 
     @RequestMapping(value = "/twilio/voice/goodbye", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> goodbye() {
@@ -65,15 +83,28 @@ public class VoiceController {
         return ResponseEntity.ok(twiml);
     }
 
-    @PostMapping(value = "/continue-call", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> continueCall() {
-        return continueCallTwiMl();
-    }
+    @RequestMapping(
+    		  value = "/twilio/voice/continue-call",
+    		  method = {RequestMethod.GET, RequestMethod.POST},
+    		  produces = MediaType.APPLICATION_XML_VALUE
+    		)
+    		public ResponseEntity<String> continueCall() {
 
-    @RequestMapping(value = "/twilio/voice/continue-call", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> twilioVoiceContinueCall() {
-        return continueCallTwiMl();
-    }
+    		    String twiml =
+    		        "<Response>" +
+    		        "<Connect>" +
+    		        "<Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/>" +
+    		        "</Connect>" +
+    		        "</Response>";
+
+    		    return ResponseEntity.ok(twiml);
+    		}
+
+
+//    @RequestMapping(value = "/twilio/voice/continue-call", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
+//    public ResponseEntity<String> twilioVoiceContinueCall() {
+//        return continueCallTwiMl();
+//    }
 
     private ResponseEntity<String> continueCallTwiMl() {
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
@@ -93,25 +124,18 @@ public class VoiceController {
     }
     
     @PostMapping(value = "/voice", produces = MediaType.APPLICATION_XML_VALUE)
-    public String voice() {
-        return "<Response>"
-             + "  <Connect>"
-             + "    <Stream url=\"wss://cristobal-unpawned-cherie.ngrok-free.dev/media-stream\"/>"
-             + "  </Connect>"
-             + "  <Redirect>/continue-call</Redirect>"
-             + "</Response>";
+    public ResponseEntity<String> voice() {
+        String twiml =
+            "<Response>" +
+            "<Say>Hello, how can I help you?</Say>" +
+            "<Connect>" +
+            "<Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/>" +
+            "</Connect>" +
+            "<Redirect>/twilio/voice/continue-call</Redirect>" +
+            "</Response>";
+        return ResponseEntity.ok(twiml);
     }
 
-    @PostMapping(
-    		  value = "/twilio/voice/say",
-    		  produces = MediaType.APPLICATION_XML_VALUE
-    		)
-    		public String say(@RequestParam String text) {
-    		    return "<Response>"
-    		         + "<Say voice=\"alice\">" + text + "</Say>"
-    		         + "<Redirect>/continue-call</Redirect>"
-    		         + "</Response>";
-    		}
 
 
 }
