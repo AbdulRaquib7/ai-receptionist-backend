@@ -1,6 +1,7 @@
 package com.ai.receptionist.websocket;
 
 import com.ai.receptionist.entity.ChatMessage;
+import com.ai.receptionist.service.BookingFlowService;
 import com.ai.receptionist.service.ConversationStore;
 import com.ai.receptionist.service.LlmService;
 import com.ai.receptionist.service.SttService;
@@ -15,10 +16,13 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import org.springframework.beans.factory.annotation.Value;
+
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,17 +41,26 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
+    private final BookingFlowService bookingFlowService;
+
+    @Value("${openai.api-key:}")
+    private String openAiApiKey;
+
+    @Value("${openai.model:gpt-4o-mini}")
+    private String openAiModel;
 
     public MediaStreamHandler(
             SttService sttService,
             LlmService llmService,
             TwilioService twilioService,
-            ConversationStore conversationStore
+            ConversationStore conversationStore,
+            BookingFlowService bookingFlowService
     ) {
         this.sttService = sttService;
         this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
+        this.bookingFlowService = bookingFlowService;
     }
 
     static class StreamState {
@@ -56,6 +69,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         boolean processing = false;
         boolean closed = false;
         String callSid;
+        String fromNumber;
     }
 
     @Override
@@ -69,13 +83,18 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             StreamState state = new StreamState();
             JsonNode start = root.path("start");
             if (!start.isMissingNode()) {
-                state.callSid = start.path("callSid").asText();
+                state.callSid = start.path("callSid").asText("");
+                JsonNode custom = start.path("customParameters");
+                if (!custom.isMissingNode()) {
+                    String from = custom.path("From").asText("");
+                    state.fromNumber = from.isEmpty() ? null : from;
+                }
             }
             if (state.callSid == null || state.callSid.isEmpty()) {
-                state.callSid = root.path("callSid").asText();
+                state.callSid = root.path("callSid").asText("");
             }
             streams.put(streamSid, state);
-            log.info("Call started | streamSid={} callSid={}", streamSid, state.callSid);
+            log.info("Call started | streamSid={} callSid={} from={}", streamSid, state.callSid, state.fromNumber);
             return;
         }
 
@@ -161,8 +180,15 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("USER | {}", userText);
                 conversationStore.appendUser(callSid, userText);
 
+                String fromNumber = state.fromNumber != null ? state.fromNumber : "";
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
-                String aiText = llmService.generateReply(history);
+                List<String> summary = history.stream()
+                        .map(m -> m.getRole() + ": " + m.getContent())
+                        .toList();
+
+                Optional<String> flowReply = bookingFlowService.processUserMessage(
+                        callSid, fromNumber, userText, summary, openAiApiKey, openAiModel);
+                String aiText = flowReply.orElseGet(() -> llmService.generateReply(callSid, fromNumber, history));
                 if (StringUtils.isBlank(aiText)) return;
 
                 log.info("AI | {}", aiText);

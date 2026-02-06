@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Map;
+
 @RestController
 public class VoiceController {
 
@@ -26,20 +28,26 @@ public class VoiceController {
     private String baseUrl;
 
     @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> inbound() {
-        return inboundTwiMl();
+    public ResponseEntity<String> inbound(@RequestParam(required = false) Map<String, String> params) {
+        return inboundTwiMl(params);
     }
 
     @PostMapping(value = "/twilio/voice/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> twilioVoiceInbound() {
-        return inboundTwiMl();
+    public ResponseEntity<String> twilioVoiceInbound(@RequestParam(required = false) Map<String, String> params) {
+        return inboundTwiMl(params);
     }
 
-    private ResponseEntity<String> inboundTwiMl() {
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you?</Say>";
-        String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
+    private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
+        String from = params != null ? params.getOrDefault("From", "") : "";
+        String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you today? You can book, cancel, or reschedule an appointment.</Say>";
+        String streamParams = "";
+        if (StringUtils.hasText(from)) {
+            streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";
+        }
+        String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\">" + streamParams + "</Stream></Connect>";
         String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
-        log.info("Inbound call -> stream to {}", mediaStreamUrl);
+        log.info("Inbound call -> stream to {} | callSid={} from={}", mediaStreamUrl, callSid, from);
         return ResponseEntity.ok(twiml);
     }
 
