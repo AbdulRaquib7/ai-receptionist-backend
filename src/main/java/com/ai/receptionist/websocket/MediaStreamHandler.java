@@ -184,7 +184,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
                 List<String> summary = history.stream()
                         .map(m -> m.getRole() + ": " + m.getContent())
-                        .toList();
+                        .collect(java.util.stream.Collectors.toList());
 
                 Optional<String> flowReply = bookingFlowService.processUserMessage(
                         callSid, fromNumber, userText, summary, openAiApiKey, openAiModel);
