@@ -123,11 +123,12 @@ public class BookingFlowService {
                 return Optional.of("You don't have any appointment to reschedule.");
             }
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
+                String doctorKey = normalizeDoctorKey(extracted.doctorKey);
                 String date = normalizeDate(extracted.date);
                 if (date == null) return Optional.empty();
                 String time = normalizeTimeForSlot(extracted.time);
                 Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
-                List<String> byDate = slots.containsKey(extracted.doctorKey) ? slots.get(extracted.doctorKey).get(date) : null;
+                List<String> byDate = slots.containsKey(doctorKey) ? slots.get(doctorKey).get(date) : null;
                 String matchedTime = matchSlotTime(byDate, time);
                 if (matchedTime == null) {
                     return Optional.of("That slot is not available. Please choose another date and time.");
@@ -136,11 +137,11 @@ public class BookingFlowService {
                 s.pendingConfirmReschedule = true;
                 s.pendingConfirmBook = false;
                 s.pendingConfirmCancel = false;
-                s.rescheduleDoctorKey = extracted.doctorKey;
+                s.rescheduleDoctorKey = doctorKey;
                 s.rescheduleDate = date;
                 s.rescheduleTime = matchedTime;
                 List<Doctor> doctors = appointmentService.getAllDoctors();
-                String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
+                String docName = doctors.stream().filter(d -> d.getKey().equals(doctorKey)).findFirst().map(d -> d.getName()).orElse(doctorKey);
                 return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
             }
             AppointmentService.AppointmentSummary a = existingSummary.get();
@@ -150,22 +151,26 @@ public class BookingFlowService {
 
         if (extracted.intent.equals("book") && StringUtils.isNotBlank(extracted.doctorKey)
                 && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
+            String doctorKey = normalizeDoctorKey(extracted.doctorKey);
             String date = normalizeDate(extracted.date);
             if (date == null) return Optional.empty();
             String time = normalizeTimeForSlot(extracted.time);
 
             Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
-            if (!slots.containsKey(extracted.doctorKey)) {
+            if (!slots.containsKey(doctorKey)) {
                 return Optional.of("Doctor not found. We have Dr Ahmed, Dr John, and Dr Evening.");
             }
-            List<String> byDate = slots.get(extracted.doctorKey).get(date);
+            List<String> byDate = slots.get(doctorKey).get(date);
             String matchedTime = matchSlotTime(byDate, time);
             if (matchedTime == null) {
+                PendingState pending = getOrCreate(callSid);
+                pending.doctorKey = doctorKey;
+                pending.date = date;
                 return Optional.of("That slot is not available. Please choose another time. Available: " + (byDate != null ? String.join(", ", byDate) : "none"));
             }
 
             PendingState s = getOrCreate(callSid);
-            s.doctorKey = extracted.doctorKey;
+            s.doctorKey = doctorKey;
             s.date = date;
             s.time = matchedTime;
             s.patientName = extracted.patientName;
@@ -177,7 +182,7 @@ public class BookingFlowService {
                 s.pendingConfirmBook = true;
                 s.pendingNeedNamePhone = false;
                 List<Doctor> doctors = appointmentService.getAllDoctors();
-                String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
+                String docName = doctors.stream().filter(d -> d.getKey().equals(doctorKey)).findFirst().map(d -> d.getName()).orElse(doctorKey);
                 return Optional.of("Your appointment with " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
             } else {
                 s.pendingNeedNamePhone = true;
@@ -189,7 +194,7 @@ public class BookingFlowService {
         // Partial booking - accumulate (user said "Dr Ahmed" or "tomorrow 10am" etc.)
         if (extracted.intent.equals("book")) {
             PendingState s = getOrCreate(callSid);
-            if (StringUtils.isNotBlank(extracted.doctorKey)) s.doctorKey = extracted.doctorKey;
+            if (StringUtils.isNotBlank(extracted.doctorKey)) s.doctorKey = normalizeDoctorKey(extracted.doctorKey);
             if (StringUtils.isNotBlank(extracted.date)) s.date = normalizeDate(extracted.date);
             if (StringUtils.isNotBlank(extracted.time)) s.time = normalizeTimeForSlot(extracted.time);
             if (StringUtils.isNotBlank(extracted.patientName)) s.patientName = extracted.patientName;
@@ -292,7 +297,18 @@ public class BookingFlowService {
         if (d.matches("\\d{4}-\\d{2}-\\d{2}")) return d;
         if (d.equalsIgnoreCase("today")) return LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         if (d.equalsIgnoreCase("tomorrow")) return LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE);
+        if (d.equalsIgnoreCase("day after tomorrow") || d.equalsIgnoreCase("day after")) return LocalDate.now().plusDays(2).format(DateTimeFormatter.ISO_LOCAL_DATE);
         return null;
+    }
+
+    /** Map Allen/Alan/hallucinated names to actual DB doctor keys. ONLY dr-ahmed, dr-john, dr-evening exist. */
+    private String normalizeDoctorKey(String key) {
+        if (key == null) return null;
+        String k = key.trim().toLowerCase();
+        if (k.equals("dr-ahmed") || k.equals("ahmed")) return "dr-ahmed";
+        if (k.equals("dr-john") || k.equals("john")) return "dr-john";
+        if (k.equals("dr-evening") || k.equals("evening") || k.equals("dr-alan") || k.equals("dr-allen") || k.equals("alan") || k.equals("allen")) return "dr-evening";
+        return key;
     }
 
     /** Normalize user time like "10.30", "2pm", "10:30 to 11:30" to a canonical form for matching. */
@@ -315,6 +331,12 @@ public class BookingFlowService {
             int h = Integer.parseInt(t.split("\\.")[0]);
             String m = t.split("\\.")[1];
             return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
+        }
+        if (t.matches("\\d{1,2}")) {
+            int h = Integer.parseInt(t);
+            if (h >= 1 && h <= 11) return String.format("%d:00 PM", h);
+            if (h == 12) return "12:00 PM";
+            if (h == 0) return "12:00 AM";
         }
         return t;
     }
@@ -348,10 +370,11 @@ public class BookingFlowService {
 
         String prompt = "Extract from conversation. Output JSON only.\n" +
                 "intent: book|cancel|reschedule|none\n" +
-                "doctorKey: dr-ahmed|dr-john|dr-evening|null (for Ahmed/John/Evening)\n" +
-                "date: YYYY-MM-DD or tomorrow or today\n" +
-                "time: 10:30 AM, 12:00 PM, 01:00 PM etc. (use start of range if '10.30 to 11.30')\n" +
-                "patientName, patientPhone: from user if given\n\n" +
+                "doctorKey: ONLY dr-ahmed, dr-john, or dr-evening. Allen/Alan/Evening doctor = dr-evening. Ahmed = dr-ahmed. John = dr-john.\n" +
+                "date: YYYY-MM-DD or tomorrow or today or day after tomorrow\n" +
+                "time: 06:00 PM, 07:00 PM etc. For '6 to 7' use 06:00 PM. For '7 to 8' use 07:00 PM. Use start of range.\n" +
+                "patientName, patientPhone: from user if given\n" +
+                "If user only says time (e.g. '7 to 8'), keep doctor from recent context if mentioned.\n\n" +
                 "Conversation:\n" + context + "\n\nLast user: " + userText + "\n\nJSON:";
 
         Map<String, Object> body = new HashMap<>();

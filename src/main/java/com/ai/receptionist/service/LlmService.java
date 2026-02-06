@@ -85,8 +85,9 @@ public class LlmService {
 
         context.append("\nRULES:\n");
         context.append("- You are a clinic voice receptionist. Keep responses SHORT (1-2 sentences) for voice.\n");
+        context.append("- ONLY use these EXACT doctor names: Dr Ahmed, Dr John, Dr Evening. NEVER say Dr Alan or Dr Allen - the evening doctor is Dr Evening.\n");
         context.append("- Book flow: 1) Get doctor + date + time, 2) Ask for name and phone, 3) Confirm. ALWAYS ask for name and phone before confirming.\n");
-        context.append("- Doctor keys: dr-ahmed (9am-12pm), dr-john (12pm-2pm), dr-evening (6pm-10pm). Time formats: 10:30 AM, 12:00 PM, etc.\n");
+        context.append("- Doctor keys: dr-ahmed (9am-12pm), dr-john (12pm-2pm), dr-evening (6pm-10pm). Allen/Alan = Dr Evening.\n");
         context.append("- ONLY use doctors and slots from the data above. Never invent slots. If slot unavailable, suggest from AVAILABLE SLOTS.\n");
         context.append("- When user asks for available times, list the exact times from AVAILABLE SLOTS for that doctor and date.\n");
 
