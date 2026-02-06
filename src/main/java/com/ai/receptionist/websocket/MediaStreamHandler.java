@@ -185,10 +185,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 String userText = sttService.transcribe(audio);
                 if (StringUtils.isBlank(userText) || userText.length() < 5) return;
 
-                log.info("USER | {}", userText);
-                conversationStore.appendUser(callSid, userText);
-
                 String fromNumber = state.fromNumber != null ? state.fromNumber : "";
+                log.info("USER | {}", userText);
+                conversationStore.appendUser(callSid, fromNumber, userText);
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
                 List<String> summary = history.stream()
                         .map(m -> m.getRole() + ": " + m.getContent())
@@ -200,7 +199,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 if (StringUtils.isBlank(aiText)) return;
 
                 log.info("AI | {}", aiText);
-                conversationStore.appendAssistant(callSid, aiText);
+                conversationStore.appendAssistant(callSid, fromNumber, aiText);
 
                 boolean endCall = isConversationEnded(aiText, userText);
                 if (endCall) {

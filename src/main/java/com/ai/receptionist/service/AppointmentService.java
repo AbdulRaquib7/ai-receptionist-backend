@@ -58,6 +58,30 @@ public class AppointmentService {
                 twilioPhone, Appointment.Status.CONFIRMED);
     }
 
+    /** Returns appointment summary (doctor, date, time) loaded within transaction to avoid LazyInitializationException. */
+    @Transactional(readOnly = true)
+    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone) {
+        Optional<Appointment> opt = appointmentRepository.findFirstByPatientTwilioPhoneAndStatusOrderByCreatedAtDesc(
+                twilioPhone, Appointment.Status.CONFIRMED);
+        if (opt.isEmpty()) return Optional.empty();
+        Appointment a = opt.get();
+        return Optional.of(new AppointmentSummary(
+                a.getDoctor().getName(),
+                a.getSlot().getSlotDate().toString(),
+                a.getSlot().getStartTime()));
+    }
+
+    public static class AppointmentSummary {
+        public final String doctorName;
+        public final String slotDate;
+        public final String startTime;
+        public AppointmentSummary(String doctorName, String slotDate, String startTime) {
+            this.doctorName = doctorName;
+            this.slotDate = slotDate;
+            this.startTime = startTime;
+        }
+    }
+
     @Transactional
     public Optional<Appointment> bookAppointment(String twilioPhone, String patientName, String patientPhone,
                                                   String doctorKey, String date, String time) {

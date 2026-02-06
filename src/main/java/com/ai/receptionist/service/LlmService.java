@@ -1,6 +1,5 @@
 package com.ai.receptionist.service;
 
-import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.ChatMessage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,14 +71,14 @@ public class LlmService {
             context.append(docKey).append(": ").append(byDate.toString()).append("\n");
         });
 
-        Optional<Appointment> existing = StringUtils.isNotBlank(fromNumber)
-                ? appointmentService.getActiveAppointmentByTwilioPhone(fromNumber)
+        Optional<AppointmentService.AppointmentSummary> existing = StringUtils.isNotBlank(fromNumber)
+                ? appointmentService.getActiveAppointmentSummary(fromNumber)
                 : Optional.empty();
         if (existing.isPresent()) {
-            Appointment a = existing.get();
-            context.append("\nCALLER'S EXISTING APPOINTMENT: ").append(a.getDoctor().getName())
-                    .append(" on ").append(a.getSlot().getSlotDate())
-                    .append(" at ").append(a.getSlot().getStartTime()).append("\n");
+            AppointmentService.AppointmentSummary a = existing.get();
+            context.append("\nCALLER'S EXISTING APPOINTMENT: ").append(a.doctorName)
+                    .append(" on ").append(a.slotDate)
+                    .append(" at ").append(a.startTime).append("\n");
         } else {
             context.append("\nCALLER HAS NO EXISTING APPOINTMENT.\n");
         }

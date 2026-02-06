@@ -104,7 +104,7 @@ public class BookingFlowService {
         ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
         if (extracted.intent.equals("cancel")) {
-            Optional<Appointment> existing = appointmentService.getActiveAppointmentByTwilioPhone(fromNumber);
+            Optional<AppointmentService.AppointmentSummary> existing = appointmentService.getActiveAppointmentSummary(fromNumber);
             if (existing.isEmpty()) {
                 return Optional.of("You don't have any active appointment to cancel.");
             }
@@ -112,14 +112,14 @@ public class BookingFlowService {
             s.pendingConfirmCancel = true;
             s.pendingConfirmBook = false;
             s.pendingConfirmReschedule = false;
-            Appointment a = existing.get();
-            return Optional.of("You have an appointment with " + a.getDoctor().getName() + " on " +
-                    a.getSlot().getSlotDate() + " at " + a.getSlot().getStartTime() + ". Say yes to cancel it.");
+            AppointmentService.AppointmentSummary a = existing.get();
+            return Optional.of("You have an appointment with " + a.doctorName + " on " +
+                    a.slotDate + " at " + a.startTime + ". Say yes to cancel it.");
         }
 
         if (extracted.intent.equals("reschedule")) {
-            Optional<Appointment> existing = appointmentService.getActiveAppointmentByTwilioPhone(fromNumber);
-            if (existing.isEmpty()) {
+            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(fromNumber);
+            if (existingSummary.isEmpty()) {
                 return Optional.of("You don't have any appointment to reschedule.");
             }
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
@@ -143,9 +143,9 @@ public class BookingFlowService {
                 String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
                 return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
             }
-            Appointment a = existing.get();
-            return Optional.of("Your current appointment is with " + a.getDoctor().getName() + " on " +
-                    a.getSlot().getSlotDate() + " at " + a.getSlot().getStartTime() + ". Please say the new doctor name, date, and time you want.");
+            AppointmentService.AppointmentSummary a = existingSummary.get();
+            return Optional.of("Your current appointment is with " + a.doctorName + " on " +
+                    a.slotDate + " at " + a.startTime + ". Please say the new doctor name, date, and time you want.");
         }
 
         if (extracted.intent.equals("book") && StringUtils.isNotBlank(extracted.doctorKey)
