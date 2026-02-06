@@ -68,7 +68,7 @@ public class BookingFlowService {
                         : doctors.stream()
                                 .map(d -> "- " + d.getName() + " (" + d.getSpecialization() + ")")
                                 .collect(Collectors.joining("\n"));
-                instructions = "You MUST list the available doctors above and ask which one they prefer. Say 'For " + (state.getSelectedSpecialization() != null ? state.getSelectedSpecialization() : "your selection") + ", we have Dr. X, Dr. Y... Which would you like?' Never say you cannot provide the list.";
+                instructions = "List these doctors from the doctor table (isActive=true) and ask which one they prefer. Say 'For " + (state.getSelectedSpecialization() != null ? state.getSelectedSpecialization() : "your selection") + ", we have [names]... Which would you like?'";
             }
             case DOCTOR_SELECTED, SLOT_SELECTION -> {
                 Long docId = state.getSelectedDoctorId();
@@ -85,7 +85,7 @@ public class BookingFlowService {
                                     .collect(Collectors.joining("\n"));
                     instructions = slots.isEmpty()
                             ? "Apologize and say no slots are available for this doctor in the next 7 days."
-                            : "Clearly offer these available slots. Say 'We have openings on...' and list them. Ask which date and time works best. Never say slots are unavailable unless the list says 'No available slots'.";
+                            : "These slots are from appointment_slot table (status=AVAILABLE). Offer them and ask which date and time. Say 'We have openings on...' and list them.";
                 }
             }
             case USER_DETAILS -> {
@@ -94,7 +94,7 @@ public class BookingFlowService {
             }
             case CONFIRMATION -> {
                 doctorListText = buildDoctorListForAllStates();
-                instructions = "Ask the caller to confirm the booking. Do not assume yes.";
+                instructions = "Ask the caller to confirm the booking. On yes: appointment is booked, patient saved to patient table, slot status set to BOOKED. Do not assume yes.";
             }
             case CANCEL_CONFIRMATION -> instructions = "Ask the caller to confirm cancellation. Say yes to confirm, no to keep.";
             case RESCHEDULE_SLOT_SELECTION -> {
@@ -133,9 +133,9 @@ public class BookingFlowService {
     private String buildUserDetailsInstructions(CallStateEntity state) {
         if (state.getCallerPhone() != null && !state.getCallerPhone().isEmpty() && state.getPatientPhone() == null) {
             String formatted = formatPhoneForSpeech(state.getCallerPhone());
-            return "The caller is from " + formatted + ". Say: I see you're calling from that number. Should I use it? If they say yes, use it. If they say another number, use that. Then ask for their name.";
+            return "The caller is from " + formatted + ". Say: I see you're calling from that number. Should I use it? If yes, use it; if they give another number, use that. Then ask for their name. Name and contact will be saved to patient table.";
         }
-        return "Ask for the caller's name and phone number to confirm the booking.";
+        return "Ask for the caller's name and phone number. These will be saved to the patient table to complete the booking.";
     }
 
     private static String formatPhoneForSpeech(String digits) {
@@ -291,7 +291,16 @@ public class BookingFlowService {
                     callStateService.transition(callSid, ConversationState.COMPLETED);
                     return BookingFlowResult.bookingSuccess(result.slot());
                 } else {
-                    return BookingFlowResult.bookingConflict(result.message());
+                    callStateService.transition(callSid, ConversationState.SLOT_SELECTION);
+                    Long docId = updated.getSelectedDoctorId();
+                    List<AppointmentSlot> alternatives = docId != null ? slotService.getAvailableSlots(docId) : List.of();
+                    String altList = alternatives.isEmpty() ? ""
+                            : " We have these times available: "
+                            + alternatives.stream().limit(5)
+                                    .map(s -> s.getSlotDate().format(DATE_FMT) + " at " + s.getStartTime().format(TIME_FMT))
+                                    .collect(Collectors.joining(", "))
+                            + ". Which would you prefer?";
+                    return BookingFlowResult.llmReply("That appointment time was just booked by someone else." + altList);
                 }
                 }
             }

@@ -32,8 +32,9 @@ public class LlmService {
 
     private static final String BASE_SYSTEM_PROMPT =
             "You are a concise, friendly medical receptionist. You help with doctor appointment booking. " +
-            "You ONLY use the data provided to you. Never assume slot availability or book appointments yourself. " +
-            "You ask short clarifying questions and give brief responses. Keep answers suitable for phone/voice.";
+            "Data comes from: doctor table (only isActive=true doctors), appointment_slot table (only AVAILABLE slots). " +
+            "When booking: patient name and contact save to patient table; slot status changes to BOOKED. " +
+            "You ONLY use the provided doctors and slots. Never invent data. Keep answers suitable for phone/voice.";
 
     private final RestTemplate restTemplate;
     private final ObjectMapper mapper = new ObjectMapper();
