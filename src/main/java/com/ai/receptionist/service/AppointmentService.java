@@ -172,14 +172,26 @@ public class AppointmentService {
     private static String normalizeTime(String time) {
         if (time == null) return null;
         String t = time.trim();
-        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)") || t.matches("\\d{1,2}\\.\\d{2}\\s*(AM|PM)")) {
-            return t.replace('.', ':');
-        }
+        if (t.contains(" to ")) t = t.substring(0, t.indexOf(" to ")).trim();
+        t = t.replace('.', ':');
+        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
         if (t.matches("\\d{1,2}:\\d{2}")) {
             int h = Integer.parseInt(t.split(":")[0]);
             String m = t.split(":")[1];
-            if (h >= 12) return String.format("%d:%s PM", h == 12 ? 12 : h - 12, m);
-            return String.format("%d:%s AM", h == 0 ? 12 : h, m);
+            return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
+        }
+        if (t.matches("(?i)\\d{1,2}\\s*pm")) {
+            int h = Integer.parseInt(t.replaceAll("(?i)\\s*pm.*", "").trim());
+            return String.format("%d:00 PM", h == 12 ? 12 : h % 12);
+        }
+        if (t.matches("(?i)\\d{1,2}\\s*am")) {
+            int h = Integer.parseInt(t.replaceAll("(?i)\\s*am.*", "").trim());
+            return String.format("%d:00 AM", h == 12 ? 12 : h % 12);
+        }
+        if (t.matches("\\d{1,2}\\.\\d{2}")) {
+            int h = Integer.parseInt(t.split("\\.")[0]);
+            String m = t.split("\\.")[1];
+            return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
         }
         return t;
     }

@@ -36,6 +36,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
+    /** Persists From number across stream reconnects (continue-call does not pass custom params) */
+    private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
     private final LlmService llmService;
@@ -87,11 +89,17 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 JsonNode custom = start.path("customParameters");
                 if (!custom.isMissingNode()) {
                     String from = custom.path("From").asText("");
-                    state.fromNumber = from.isEmpty() ? null : from;
+                    if (!from.isEmpty()) {
+                        state.fromNumber = from;
+                        callSidToFrom.put(state.callSid, from);
+                    }
                 }
             }
             if (state.callSid == null || state.callSid.isEmpty()) {
                 state.callSid = root.path("callSid").asText("");
+            }
+            if (state.fromNumber == null) {
+                state.fromNumber = callSidToFrom.get(state.callSid);
             }
             streams.put(streamSid, state);
             log.info("Call started | streamSid={} callSid={} from={}", streamSid, state.callSid, state.fromNumber);

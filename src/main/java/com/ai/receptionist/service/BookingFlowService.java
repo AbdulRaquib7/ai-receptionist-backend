@@ -43,6 +43,7 @@ public class BookingFlowService {
         public String patientName;
         public String patientPhone;
         public boolean pendingConfirmBook;
+        public boolean pendingNeedNamePhone;
         public boolean pendingConfirmCancel;
         public boolean pendingConfirmReschedule;
         public String rescheduleDoctorKey;
@@ -63,6 +64,23 @@ public class BookingFlowService {
         // Confirm booking
         if (state != null && state.pendingConfirmBook && isAffirmative(normalized)) {
             return confirmBook(callSid, fromNumber, state);
+        }
+
+        // Provide name/phone when asked
+        if (state != null && state.pendingNeedNamePhone) {
+            ExtractedIntent ext = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
+            if (StringUtils.isNotBlank(ext.patientName) || StringUtils.isNotBlank(ext.patientPhone)) {
+                if (StringUtils.isNotBlank(ext.patientName)) state.patientName = ext.patientName;
+                if (StringUtils.isNotBlank(ext.patientPhone)) state.patientPhone = ext.patientPhone;
+                if (StringUtils.isNotBlank(state.patientName) && StringUtils.isNotBlank(state.patientPhone)) {
+                    state.pendingNeedNamePhone = false;
+                    state.pendingConfirmBook = true;
+                    List<Doctor> doctors = appointmentService.getAllDoctors();
+                    String docName = doctors.stream().filter(d -> d.getKey().equals(state.doctorKey)).findFirst().map(d -> d.getName()).orElse(state.doctorKey);
+                    return Optional.of("Your appointment with " + docName + " on " + state.date + " at " + state.time + ". Say yes to confirm.");
+                }
+            }
+            return Optional.of("May I have your name and phone number for the appointment?");
         }
 
         // Confirm cancel
@@ -107,9 +125,11 @@ public class BookingFlowService {
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
                 String date = normalizeDate(extracted.date);
                 if (date == null) return Optional.empty();
+                String time = normalizeTimeForSlot(extracted.time);
                 Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
-                if (!slots.containsKey(extracted.doctorKey) || slots.get(extracted.doctorKey).get(date) == null
-                        || !slots.get(extracted.doctorKey).get(date).contains(extracted.time)) {
+                List<String> byDate = slots.containsKey(extracted.doctorKey) ? slots.get(extracted.doctorKey).get(date) : null;
+                String matchedTime = matchSlotTime(byDate, time);
+                if (matchedTime == null) {
                     return Optional.of("That slot is not available. Please choose another date and time.");
                 }
                 PendingState s = getOrCreate(callSid);
@@ -118,10 +138,10 @@ public class BookingFlowService {
                 s.pendingConfirmCancel = false;
                 s.rescheduleDoctorKey = extracted.doctorKey;
                 s.rescheduleDate = date;
-                s.rescheduleTime = extracted.time;
+                s.rescheduleTime = matchedTime;
                 List<Doctor> doctors = appointmentService.getAllDoctors();
                 String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
-                return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + extracted.time + ". Say yes to confirm.");
+                return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
             }
             Appointment a = existing.get();
             return Optional.of("Your current appointment is with " + a.getDoctor().getName() + " on " +
@@ -132,29 +152,38 @@ public class BookingFlowService {
                 && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
             String date = normalizeDate(extracted.date);
             if (date == null) return Optional.empty();
+            String time = normalizeTimeForSlot(extracted.time);
 
             Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
             if (!slots.containsKey(extracted.doctorKey)) {
                 return Optional.of("Doctor not found. We have Dr Ahmed, Dr John, and Dr Evening.");
             }
             List<String> byDate = slots.get(extracted.doctorKey).get(date);
-            if (byDate == null || !byDate.contains(extracted.time)) {
-                return Optional.of("That slot is not available. Please choose another doctor, date, or time.");
+            String matchedTime = matchSlotTime(byDate, time);
+            if (matchedTime == null) {
+                return Optional.of("That slot is not available. Please choose another time. Available: " + (byDate != null ? String.join(", ", byDate) : "none"));
             }
 
             PendingState s = getOrCreate(callSid);
             s.doctorKey = extracted.doctorKey;
             s.date = date;
-            s.time = extracted.time;
+            s.time = matchedTime;
             s.patientName = extracted.patientName;
             s.patientPhone = extracted.patientPhone;
-            s.pendingConfirmBook = true;
             s.pendingConfirmCancel = false;
             s.pendingConfirmReschedule = false;
 
-            List<Doctor> doctors = appointmentService.getAllDoctors();
-            String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
-            return Optional.of("Your appointment with " + docName + " on " + date + " at " + extracted.time + ". Say yes to confirm.");
+            if (StringUtils.isNotBlank(s.patientName) && StringUtils.isNotBlank(s.patientPhone)) {
+                s.pendingConfirmBook = true;
+                s.pendingNeedNamePhone = false;
+                List<Doctor> doctors = appointmentService.getAllDoctors();
+                String docName = doctors.stream().filter(d -> d.getKey().equals(extracted.doctorKey)).findFirst().map(d -> d.getName()).orElse(extracted.doctorKey);
+                return Optional.of("Your appointment with " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
+            } else {
+                s.pendingNeedNamePhone = true;
+                s.pendingConfirmBook = false;
+                return Optional.of("May I have your name and phone number for the appointment?");
+            }
         }
 
         // Partial booking - accumulate (user said "Dr Ahmed" or "tomorrow 10am" etc.)
@@ -162,7 +191,7 @@ public class BookingFlowService {
             PendingState s = getOrCreate(callSid);
             if (StringUtils.isNotBlank(extracted.doctorKey)) s.doctorKey = extracted.doctorKey;
             if (StringUtils.isNotBlank(extracted.date)) s.date = normalizeDate(extracted.date);
-            if (StringUtils.isNotBlank(extracted.time)) s.time = extracted.time;
+            if (StringUtils.isNotBlank(extracted.time)) s.time = normalizeTimeForSlot(extracted.time);
             if (StringUtils.isNotBlank(extracted.patientName)) s.patientName = extracted.patientName;
             if (StringUtils.isNotBlank(extracted.patientPhone)) s.patientPhone = extracted.patientPhone;
 
@@ -170,13 +199,25 @@ public class BookingFlowService {
                 Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
                 if (slots.containsKey(s.doctorKey)) {
                     List<String> byDate = slots.get(s.doctorKey).get(s.date);
-                    if (byDate != null && byDate.contains(s.time)) {
-                        s.pendingConfirmBook = true;
+                    String matchedTime = matchSlotTime(byDate, s.time);
+                    if (matchedTime != null) {
+                        s.time = matchedTime;
                         s.pendingConfirmCancel = false;
                         s.pendingConfirmReschedule = false;
+                        if (StringUtils.isNotBlank(s.patientName) && StringUtils.isNotBlank(s.patientPhone)) {
+                            s.pendingConfirmBook = true;
+                            s.pendingNeedNamePhone = false;
+                        } else {
+                            s.pendingNeedNamePhone = true;
+                            s.pendingConfirmBook = false;
+                        }
                         List<Doctor> doctors = appointmentService.getAllDoctors();
                         String docName = doctors.stream().filter(d -> d.getKey().equals(s.doctorKey)).findFirst().map(d -> d.getName()).orElse(s.doctorKey);
-                        return Optional.of("Your appointment with " + docName + " on " + s.date + " at " + s.time + ". Say yes to confirm.");
+                        if (s.pendingConfirmBook) {
+                            return Optional.of("Your appointment with " + docName + " on " + s.date + " at " + matchedTime + ". Say yes to confirm.");
+                        } else {
+                            return Optional.of("May I have your name and phone number for the appointment?");
+                        }
                     }
                 }
                 return Optional.of("That slot is not available. Please choose another time.");
@@ -187,19 +228,16 @@ public class BookingFlowService {
     }
 
     private Optional<String> confirmBook(String callSid, String fromNumber, PendingState state) {
-        // We should have stored the booking attempt - but we book on confirm. Let me re-check the flow.
-        // Actually in the "book" path above we already book immediately when we have doctor+date+time. So there's no "pending confirm" for book in the current design - we book right away.
-        // Let me align with Express: store in pending, ask "say yes to confirm", then on yes do the actual book.
-        // So we need: when we have doctor+date+time, DON'T book yet. Set pendingConfirmBook and return "Say yes to confirm".
-        // On "yes", THEN call bookAppointment.
         if (StringUtils.isBlank(state.doctorKey) || state.date == null || StringUtils.isBlank(state.time)) {
             clearPending(callSid);
             return Optional.of("I don't have the full booking details. Let's try again.");
         }
-        Optional<Appointment> result = appointmentService.bookAppointment(fromNumber, state.patientName, state.patientPhone,
+        String twilioPhone = StringUtils.isNotBlank(fromNumber) ? fromNumber : state.patientPhone;
+        Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName, state.patientPhone,
                 state.doctorKey, state.date, state.time);
         clearPending(callSid);
         if (result.isPresent()) {
+            log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey, state.date, state.time);
             return Optional.of("Your appointment is confirmed. Thank you. Have a great day!");
         }
         return Optional.of("Sorry, that slot was just taken. Please choose another time.");
@@ -228,11 +266,12 @@ public class BookingFlowService {
     }
 
     private boolean isAffirmative(String s) {
-        return s.matches("yes|yeah|yep|yup|correct|ok|okay|sure|confirm|confirmed");
+        return s.contains("yes") || s.contains("yeah") || s.contains("yep") || s.contains("correct")
+                || s.contains("ok") || s.contains("sure") || s.contains("confirm");
     }
 
     private boolean isNegative(String s) {
-        return s.matches("no|nope|cancel|never mind|don't|dont");
+        return s.matches("no|nope|cancel|never mind|don't|dont") || (s.length() < 20 && s.contains("no"));
     }
 
     private PendingState getOrCreate(String callSid) {
@@ -256,6 +295,42 @@ public class BookingFlowService {
         return null;
     }
 
+    /** Normalize user time like "10.30", "2pm", "10:30 to 11:30" to a canonical form for matching. */
+    private String normalizeTimeForSlot(String t) {
+        if (t == null) return null;
+        t = t.trim();
+        if (t.contains(" to ")) t = t.substring(0, t.indexOf(" to ")).trim();
+        t = t.replace('.', ':');
+        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
+        if (t.matches("\\d{1,2}\\.\\d{2}\\s*(AM|PM)")) return t.replace('.', ':');
+        if (t.matches("\\d{1,2}:\\d{2}")) {
+            int h = Integer.parseInt(t.split(":")[0]);
+            String m = t.split(":")[1];
+            return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
+        }
+        if (t.matches("\\d{1,2}\\s*(AM|PM)")) return t.replaceFirst("(\\d{1,2})\\s*(AM|PM)", "$1:00 $2");
+        if (t.toLowerCase().matches("\\d{1,2}\\s*pm")) return t.replaceAll("(?i)pm", "PM").replace(" ", "") + ":00";
+        if (t.toLowerCase().matches("\\d{1,2}\\s*am")) return t.replaceAll("(?i)am", "AM").replace(" ", "") + ":00";
+        if (t.matches("\\d{1,2}\\.\\d{2}")) {
+            int h = Integer.parseInt(t.split("\\.")[0]);
+            String m = t.split("\\.")[1];
+            return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
+        }
+        return t;
+    }
+
+    /** Find matching slot from available list. Handles "10:30 AM" vs "10.30" etc. */
+    private String matchSlotTime(List<String> available, String userTime) {
+        if (available == null) return null;
+        String norm = normalizeTimeForSlot(userTime);
+        if (norm == null) return null;
+        for (String s : available) {
+            if (s.equalsIgnoreCase(norm)) return s;
+            if (normalizeTimeForSlot(s).equalsIgnoreCase(norm)) return s;
+        }
+        return null;
+    }
+
     private ExtractedIntent extractIntent(String userText, List<String> conversationSummary, String openAiKey, String openAiModel) {
         ExtractedIntent out = new ExtractedIntent();
         out.intent = "none";
@@ -271,15 +346,13 @@ public class BookingFlowService {
                 ? String.join("\n", conversationSummary.subList(Math.max(0, conversationSummary.size() - 6), conversationSummary.size()))
                 : "";
 
-        String prompt = "You are an intent extractor. Given the conversation and the LAST user message, extract:\n" +
-                "- intent: one of book, cancel, reschedule, none\n" +
-                "- doctorKey: if user mentioned a doctor, map to dr-ahmed, dr-john, or dr-evening (null otherwise)\n" +
-                "- date: YYYY-MM-DD or 'tomorrow' or 'today' (null if not given)\n" +
-                "- time: like '10:00 AM', '09:30 AM' (null if not given)\n" +
-                "- patientName: user's name if given\n" +
-                "- patientPhone: user's phone if given\n\n" +
-                "Conversation:\n" + context + "\n\nLast user message: " + userText + "\n\n" +
-                "Respond ONLY with valid JSON: {\"intent\":\"...\",\"doctorKey\":\"...\",\"date\":\"...\",\"time\":\"...\",\"patientName\":\"...\",\"patientPhone\":\"...\"}";
+        String prompt = "Extract from conversation. Output JSON only.\n" +
+                "intent: book|cancel|reschedule|none\n" +
+                "doctorKey: dr-ahmed|dr-john|dr-evening|null (for Ahmed/John/Evening)\n" +
+                "date: YYYY-MM-DD or tomorrow or today\n" +
+                "time: 10:30 AM, 12:00 PM, 01:00 PM etc. (use start of range if '10.30 to 11.30')\n" +
+                "patientName, patientPhone: from user if given\n\n" +
+                "Conversation:\n" + context + "\n\nLast user: " + userText + "\n\nJSON:";
 
         Map<String, Object> body = new HashMap<>();
         body.put("model", openAiModel != null ? openAiModel : "gpt-4o-mini");

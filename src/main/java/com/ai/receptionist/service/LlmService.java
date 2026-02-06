@@ -86,11 +86,10 @@ public class LlmService {
 
         context.append("\nRULES:\n");
         context.append("- You are a clinic voice receptionist. Keep responses SHORT (1-2 sentences) for voice.\n");
-        context.append("- User can: book, cancel, or reschedule. Slots are only for the next 7 days.\n");
-        context.append("- To book: need doctor (dr-ahmed, dr-john, dr-evening), date (YYYY-MM-DD or 'tomorrow'), time (e.g. 10:00 AM), and optionally name and phone.\n");
-        context.append("- When listing doctors, use: Dr Ahmed (9am-12pm), Dr John (12pm-2pm), Dr Evening (6pm-10pm).\n");
-        context.append("- Guide the user step by step if they haven't provided all booking details.\n");
-        context.append("- Never make up slots - only use the AVAILABLE SLOTS above.\n");
+        context.append("- Book flow: 1) Get doctor + date + time, 2) Ask for name and phone, 3) Confirm. ALWAYS ask for name and phone before confirming.\n");
+        context.append("- Doctor keys: dr-ahmed (9am-12pm), dr-john (12pm-2pm), dr-evening (6pm-10pm). Time formats: 10:30 AM, 12:00 PM, etc.\n");
+        context.append("- ONLY use doctors and slots from the data above. Never invent slots. If slot unavailable, suggest from AVAILABLE SLOTS.\n");
+        context.append("- When user asks for available times, list the exact times from AVAILABLE SLOTS for that doctor and date.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();
