@@ -69,7 +69,7 @@ public class CallStateService {
         CallStateEntity state = getOrCreate(callSid);
         if (name != null) state.setPatientName(name);
         if (phone != null) state.setPatientPhone(phone);
-        if (state.getPatientName() != null && state.getPatientPhone() != null) {
+        if (state.getPatientName() != null && state.getPatientPhone() != null && state.getSelectedSlotId() != null) {
             state.setState(ConversationState.CONFIRMATION);
         }
         return repository.save(state);

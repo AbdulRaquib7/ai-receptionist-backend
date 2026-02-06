@@ -223,6 +223,16 @@ public class BookingFlowService {
             callStateService.transition(callSid, ConversationState.INTENT_CONFIRMATION);
         }
 
+        // Doctor selection from GREETING/COMPLETED when user names a doctor (e.g. "I want to book Dr. Michael Chen")
+        if ((state.getState() == ConversationState.GREETING || state.getState() == ConversationState.COMPLETED) && matchesBookingIntent(lower)) {
+            Doctor directDoctor = matchDoctor(lower, callSid, state);
+            if (directDoctor != null) {
+                callStateService.setSelectedSpecialization(callSid, directDoctor.getSpecialization());
+                callStateService.updateSelectedDoctor(callSid, directDoctor.getId());
+                state = callStateService.getOrCreate(callSid);
+            }
+        }
+
         // Confirm intent -> ask specialization
         if (state.getState() == ConversationState.INTENT_CONFIRMATION && matchesConfirmation(lower)) {
             callStateService.transition(callSid, ConversationState.SPECIALIZATION_ASK);
@@ -264,10 +274,8 @@ public class BookingFlowService {
             }
         }
 
-        // User details (name, phone)
-        if (state.getState() == ConversationState.USER_DETAILS) {
-            extractAndSavePatientDetails(callSid, userText, state);
-        }
+        // User details (name, phone) - also capture name/phone when said in other states so we have it for confirmation
+        extractAndSavePatientDetails(callSid, userText, state);
 
         // Confirmation (yes/no)
         if (state.getState() == ConversationState.CONFIRMATION) {
@@ -307,6 +315,12 @@ public class BookingFlowService {
             if (matchesRejection(lower)) {
                 callStateService.transition(callSid, ConversationState.SLOT_SELECTION);
             }
+        }
+
+        // Use deterministic reply for SPECIALIZATION_ASK and DOCTOR_LIST to enforce correct flow (prevents LLM from skipping to name/phone)
+        state = callStateService.getOrCreate(callSid);
+        if (state.getState() == ConversationState.SPECIALIZATION_ASK || state.getState() == ConversationState.DOCTOR_LIST) {
+            return BookingFlowResult.llmReply(getFallbackReply(callSid));
         }
 
         LlmService.LlmContext ctx = buildContext(callSid);
