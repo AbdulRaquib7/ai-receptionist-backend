@@ -154,7 +154,7 @@ public class SlotService {
 
     @Transactional(readOnly = true)
     public List<Doctor> getActiveDoctors() {
-        return doctorRepository.findByActiveTrueOrderByName();
+        return doctorRepository.findByIsActiveTrueOrderByName();
     }
 
     @Transactional(readOnly = true)

@@ -39,14 +39,16 @@ public class DataInitializer {
     @EventListener(ApplicationReadyEvent.class)
     @Order(1)
     public void seed() {
-        List<Doctor> doctors = doctorRepository.findByActiveTrueOrderByName();
+        List<Doctor> doctors = doctorRepository.findByIsActiveTrueOrderByName();
         if (doctors.isEmpty()) {
             log.info("Seeding doctors...");
             doctors = List.of(
-                    doctorRepository.save(Doctor.builder().name("Dr. Sarah Johnson").specialization("General Practice").description("Experienced general practitioner").active(true).build()),
-                    doctorRepository.save(Doctor.builder().name("Dr. Michael Chen").specialization("Cardiology").description("Heart specialist").active(true).build()),
-                    doctorRepository.save(Doctor.builder().name("Dr. Emily Davis").specialization("Pediatrics").description("Children's health").active(true).build())
+                    doctorRepository.save(Doctor.builder().name("Dr. Sarah Johnson").specialization("General Practice").description("Experienced general practitioner").isActive(true).build()),
+                    doctorRepository.save(Doctor.builder().name("Dr. Michael Chen").specialization("Cardiology").description("Heart specialist").isActive(true).build()),
+                    doctorRepository.save(Doctor.builder().name("Dr. Emily Davis").specialization("Pediatrics").description("Children's health").isActive(true).build())
             );
+        }else {
+        log.info("doctors already seeded..!");
         }
 
         for (Doctor d : doctors) {
