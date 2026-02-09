@@ -98,6 +98,7 @@ public class LlmService {
         context.append("- Book flow: 1) Ask user to choose doctor first. 2) Fetch slots for that doctor. 3) Mention 2-3 slots OR ask preferred time. 4) Get name and phone. 5) Confirm. Twilio caller number can be default if user agrees.\n");
         context.append("- Cancel flow: verify by phone, cancel, confirm.\n");
         context.append("- Reschedule flow: identify by Twilio caller or user phone, fetch existing, ask new time, update.\n");
+        context.append("- if the user speaks like hangup the call inbetween the booking ask for a confimation to hang up.\n");
         context.append("- If slot unavailable: politely ask for different time. Do NOT repeat all slots.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();

@@ -67,9 +67,6 @@ public class AppointmentService {
         return result;
     }
 
-    // =========================================================
-    // EXISTING APPOINTMENT
-    // =========================================================
     public Optional<Appointment> getActiveAppointmentByTwilioPhone(String twilioPhone) {
         return appointmentRepository
                 .findFirstByPatientTwilioPhoneAndStatusOrderByCreatedAtDesc(
@@ -113,9 +110,6 @@ public class AppointmentService {
         }
     }
 
-    // =========================================================
-    // BOOK APPOINTMENT (CONCURRENCY SAFE)
-    // =========================================================
     @Transactional
     public Optional<Appointment> bookAppointment(
             String twilioPhone,
@@ -144,7 +138,6 @@ public class AppointmentService {
             return Optional.empty();
         }
 
-        // 🔒 PESSIMISTIC LOCK — prevents double booking
         Optional<AppointmentSlot> slotOpt =
                 slotRepository.findByDoctorIdAndSlotDateAndStartTimeAndStatus(
                         doctor.getId(),
@@ -154,24 +147,15 @@ public class AppointmentService {
                 );
 
         if (!slotOpt.isPresent()) {
-            log.warn("Slot not available: {} {} {}", doctorKey, date, time);
+            log.warn("Slot not available: doctor={} date={} time={}", doctorKey, date, time);
             return Optional.empty();
         }
 
-        Patient patient =
-                patientRepository.findByTwilioPhone(twilioPhone).orElse(null);
-
-        if (patient == null) {
-            patient = Patient.builder()
-                    .name(patientName != null ? patientName : "Unknown")
-                    .phone(patientPhone != null ? patientPhone : twilioPhone)
-                    .twilioPhone(twilioPhone)
-                    .build();
-        } else {
-            // Update with current booking's name/phone - same number can book for different people
-            if (StringUtils.hasText(patientName)) patient.setName(patientName);
-            if (StringUtils.hasText(patientPhone)) patient.setPhone(patientPhone);
-        }
+        Patient patient = Patient.builder()
+                .name(StringUtils.hasText(patientName) ? patientName : "Unknown")
+                .phone(StringUtils.hasText(patientPhone) ? patientPhone : twilioPhone)
+                .twilioPhone(twilioPhone)
+                .build();
 
         patient = patientRepository.save(patient);
 
@@ -189,8 +173,11 @@ public class AppointmentService {
         appointment = appointmentRepository.save(appointment);
 
         log.info(
-                "Booked appointment: patient={} doctor={} date={} time={}",
+                "Booked appointment | apptId={} patientId={} name={} phone={} doctor={} date={} time={}",
+                appointment.getId(),
+                patient.getId(),
                 patient.getName(),
+                patient.getPhone(),
                 doctor.getName(),
                 date,
                 time
@@ -199,9 +186,7 @@ public class AppointmentService {
         return Optional.of(appointment);
     }
 
-    // =========================================================
-    // CANCEL
-    // =========================================================
+
     @Transactional
     public boolean cancelAppointment(String twilioPhone) {
 
@@ -220,9 +205,6 @@ public class AppointmentService {
         return true;
     }
 
-    // =========================================================
-    // RESCHEDULE
-    // =========================================================
     @Transactional
     public Optional<Appointment> rescheduleAppointment(
             String twilioPhone,
@@ -284,9 +266,6 @@ public class AppointmentService {
         return Optional.of(existing);
     }
 
-    // =========================================================
-    // TIME NORMALIZATION
-    // =========================================================
     private static String normalizeTime(String time) {
 
         if (time == null) return null;
