@@ -40,7 +40,7 @@ public class VoiceController {
     private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
         String from = params != null ? params.getOrDefault("From", "") : "";
         String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you today? You can book, cancel, or reschedule an appointment.</Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">How can I help you? You can book, reschedule, or cancel an appointment.</Say>";
         String streamParams = "";
         if (StringUtils.hasText(from)) {
             streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";

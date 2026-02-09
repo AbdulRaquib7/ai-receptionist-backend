@@ -59,14 +59,21 @@ public class LlmService {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         StringBuilder context = new StringBuilder();
+        context.append("DATABASE STATE (fetch dynamically - this is the single source of truth):\n\n");
+
         List<Doctor> doctors = appointmentService.getAllDoctors();
-        context.append("DOCTORS:\n");
+        context.append("DOCTORS (from doctor table):\n");
         for (Doctor d : doctors) {
-            context.append("- ").append(d.getKey()).append(": ").append(d.getName()).append("\n");
+            context.append("- key: ").append(d.getKey())
+                    .append(", name: ").append(d.getName());
+            if (d.getSpecialization() != null && !d.getSpecialization().isBlank()) {
+                context.append(", specialization: ").append(d.getSpecialization());
+            }
+            context.append("\n");
         }
 
         Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
-        context.append("\nAVAILABLE SLOTS (date -> times):\n");
+        context.append("\nAVAILABLE SLOTS (from appointment_slot where status=AVAILABLE):\n");
         slots.forEach((docKey, byDate) -> {
             context.append(docKey).append(": ").append(byDate.toString()).append("\n");
         });
@@ -83,13 +90,15 @@ public class LlmService {
             context.append("\nCALLER HAS NO EXISTING APPOINTMENT.\n");
         }
 
-        context.append("\nRULES:\n");
-        context.append("- You are a clinic voice receptionist. Keep responses SHORT (1-2 sentences) for voice.\n");
-        context.append("- ONLY use these EXACT doctor names: Dr Ahmed, Dr John, Dr Evening. NEVER say Dr Alan or Dr Allen - the evening doctor is Dr Evening.\n");
-        context.append("- Book flow: 1) Get doctor + date + time, 2) Ask for name and phone, 3) Confirm. ALWAYS ask for name and phone before confirming.\n");
-        context.append("- Doctor keys: dr-ahmed (9am-12pm), dr-john (12pm-2pm), dr-evening (6pm-10pm). Allen/Alan = Dr Evening.\n");
-        context.append("- ONLY use doctors and slots from the data above. Never invent slots. If slot unavailable, suggest from AVAILABLE SLOTS.\n");
-        context.append("- When user asks for available times, list the exact times from AVAILABLE SLOTS for that doctor and date.\n");
+        context.append("\nCRITICAL RULES:\n");
+        context.append("- NEVER use hardcoded or cached doctor names. ONLY use names from the DOCTORS list above.\n");
+        context.append("- NEVER hallucinate. If data is missing above, say you don't have that information.\n");
+        context.append("- NEVER dump all available slots. When listing slots, mention ONLY 2-3 nearest. Or ask user for preferred time.\n");
+        context.append("- Responses must be SHORT (1-2 sentences) for voice.\n");
+        context.append("- Book flow: 1) Ask user to choose doctor first. 2) Fetch slots for that doctor. 3) Mention 2-3 slots OR ask preferred time. 4) Get name and phone. 5) Confirm. Twilio caller number can be default if user agrees.\n");
+        context.append("- Cancel flow: verify by phone, cancel, confirm.\n");
+        context.append("- Reschedule flow: identify by Twilio caller or user phone, fetch existing, ask new time, update.\n");
+        context.append("- If slot unavailable: politely ask for different time. Do NOT repeat all slots.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();
