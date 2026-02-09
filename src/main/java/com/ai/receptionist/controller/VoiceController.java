@@ -59,13 +59,18 @@ public class VoiceController {
             return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
         }
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
-        String redirectPath = endCall ? "/twilio/voice/goodbye" : "/twilio/voice/continue-call";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
+        if (endCall) {
+            // Hang up immediately after speaking - no redirect, more reliable
+            String twiml = "<Response>" + sayTwiml + "<Hangup/></Response>";
+            log.info("Conversation ended -> hanging up call");
+            return ResponseEntity.ok(twiml);
+        }
+        String redirectPath = "/twilio/voice/continue-call";
         String redirectUrl = StringUtils.hasText(baseUrl)
             ? baseUrl.trim().replaceAll("/$", "") + redirectPath
             : redirectPath;
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
-        String redirectTwiml = "<Redirect>" + escapeXml(redirectUrl) + "</Redirect>";
-        String twiml = "<Response>" + sayTwiml + redirectTwiml + "</Response>";
+        String twiml = "<Response>" + sayTwiml + "<Redirect>" + escapeXml(redirectUrl) + "</Redirect></Response>";
         return ResponseEntity.ok(twiml);
     }
 

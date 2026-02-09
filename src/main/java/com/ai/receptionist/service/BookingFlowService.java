@@ -354,7 +354,9 @@ public class BookingFlowService {
     /** Map user input (name, key, specialization) to actual DB doctor key. Never hardcode; always fetch from DB. */
     private String normalizeDoctorKey(String userInput) {
         if (userInput == null || userInput.isBlank()) return null;
-        String k = userInput.trim().toLowerCase();
+        String k = userInput.trim().toLowerCase().replace(".", "");
+        // STT often transcribes "Alan" as "Allen" - normalize before matching
+        if (k.equals("allen")) k = "alan";
         List<Doctor> doctors = appointmentService.getAllDoctors();
         for (Doctor d : doctors) {
             if (d.getKey() != null && d.getKey().toLowerCase().equals(k)) return d.getKey();

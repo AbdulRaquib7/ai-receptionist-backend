@@ -167,9 +167,11 @@ public class AppointmentService {
                     .phone(patientPhone != null ? patientPhone : twilioPhone)
                     .twilioPhone(twilioPhone)
                     .build();
+        } else {
+            // Update with current booking's name/phone - same number can book for different people
+            if (StringUtils.hasText(patientName)) patient.setName(patientName);
+            if (StringUtils.hasText(patientPhone)) patient.setPhone(patientPhone);
         }
-        // Do NOT overwrite existing patient name/phone - allows multiple appointments
-        // with same Twilio number without losing the original patient details
 
         patient = patientRepository.save(patient);
 
