@@ -351,12 +351,10 @@ public class BookingFlowService {
         return null;
     }
 
-    /** Map user input (name, key, specialization) to actual DB doctor key. Never hardcode; always fetch from DB. */
+    /** Map user input (name, key, specialization) to actual DB doctor key. All matching from DB only; intent extractor handles variants (e.g. Allen/Alan). */
     private String normalizeDoctorKey(String userInput) {
         if (userInput == null || userInput.isBlank()) return null;
         String k = userInput.trim().toLowerCase().replace(".", "");
-        // STT often transcribes "Alan" as "Allen" - normalize before matching
-        if (k.equals("allen")) k = "alan";
         List<Doctor> doctors = appointmentService.getAllDoctors();
         for (Doctor d : doctors) {
             if (d.getKey() != null && d.getKey().toLowerCase().equals(k)) return d.getKey();
@@ -467,7 +465,7 @@ public class BookingFlowService {
         String todayIso = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         String prompt = "Extract from conversation. Output JSON only. Today is " + todayIso + ".\n" +
                 "intent: book|cancel|reschedule|none\n" +
-                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Output the key (e.g. dr-ahmed) or empty if unclear.\n" +
+                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). Output the matching key or empty if unclear.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given\n" +
