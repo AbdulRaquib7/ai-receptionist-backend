@@ -153,18 +153,26 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Returns true if the exchange indicates the conversation is over (e.g. goodbye, thanks, have a great day).
+     * Returns true if the exchange indicates the conversation is over.
+     * Uses stricter user-side checks to avoid false hangups from background noise
+     * (e.g. STT mishearing noise as "bye", "thanks").
      */
     private boolean isConversationEnded(String aiReply, String userMessage) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
+
+        // AI said explicit closing (e.g. after "Your appointment is confirmed. Have a great day!")
         if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")) {
             return true;
         }
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("thanks")
-                || user.contains("nothing else")
-                || (user.contains("thank you") && (user.contains("bye") || user.length() < 30))) {
+
+        // User-triggered: require longer phrase to avoid noise ("bye", "thanks" alone often misheard)
+        if (user.length() < 8) return false;
+        if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")) {
+            return true;
+        }
+        if (user.contains("thank you") && (user.contains("goodbye") || user.contains("bye bye") || user.contains("that's all"))) {
             return true;
         }
         return false;
