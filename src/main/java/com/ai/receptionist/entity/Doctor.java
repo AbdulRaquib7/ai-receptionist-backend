@@ -21,6 +21,8 @@ public class Doctor {
 
     @Column(nullable = false, length = 100)
     private String name;
+    
+    private String specialization;
 
     @Column(name = "schedule_start", nullable = false, length = 5)
     private String scheduleStart;

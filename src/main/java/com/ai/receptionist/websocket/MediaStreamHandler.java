@@ -162,7 +162,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")) {
             return true;
         }
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("that is all")
+        if (user.contains("goodbye") || user.contains("that's all") || user.contains("thanks")
                 || user.contains("nothing else")
                 || (user.contains("thank you") && (user.contains("bye") || user.length() < 30))) {
             return true;

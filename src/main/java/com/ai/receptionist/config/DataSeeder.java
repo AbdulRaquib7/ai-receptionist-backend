@@ -42,8 +42,8 @@ public class DataSeeder {
                     .active(true)
                     .build();
             Doctor drEvening = Doctor.builder()
-                    .key("dr-evening")
-                    .name("Dr Evening")
+                    .key("dr-alan")
+                    .name("Dr Alan")
                     .scheduleStart("18:00")
                     .scheduleEnd("22:00")
                     .active(true)
