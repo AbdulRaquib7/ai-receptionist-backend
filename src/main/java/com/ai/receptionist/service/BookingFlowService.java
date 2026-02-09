@@ -46,6 +46,7 @@ public class BookingFlowService {
         public boolean pendingNeedNamePhone;
         public boolean pendingConfirmCancel;
         public boolean pendingConfirmReschedule;
+        public boolean pendingRescheduleDetails;  // waiting for user to give new slot
         public String rescheduleDoctorKey;
         public String rescheduleDate;
         public String rescheduleTime;
@@ -117,6 +118,43 @@ public class BookingFlowService {
                     a.slotDate + " at " + a.startTime + ". Say yes to cancel it.");
         }
 
+        // Reschedule: user previously asked to reschedule, now providing new slot (date/time/doctor)
+        if (state != null && state.pendingRescheduleDetails) {
+            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(fromNumber);
+            if (existingSummary.isEmpty()) {
+                state.pendingRescheduleDetails = false;
+                return Optional.of("You don't have any appointment to reschedule.");
+            }
+            AppointmentService.AppointmentSummary current = existingSummary.get();
+            final String resolvedDoctorKey;
+            if (StringUtils.isNotBlank(extracted.doctorKey)) {
+                resolvedDoctorKey = normalizeDoctorKey(extracted.doctorKey);
+            } else {
+                resolvedDoctorKey = appointmentService.getAllDoctors().stream()
+                        .filter(d -> d.getName().equals(current.doctorName))
+                        .findFirst()
+                        .map(Doctor::getKey)
+                        .orElse(null);
+            }
+            String date = StringUtils.isNotBlank(extracted.date) ? normalizeDate(extracted.date) : null;
+            String time = StringUtils.isNotBlank(extracted.time) ? normalizeTimeForSlot(extracted.time) : null;
+            if (resolvedDoctorKey != null && date != null && time != null) {
+                Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
+                List<String> byDate = slots.containsKey(resolvedDoctorKey) ? slots.get(resolvedDoctorKey).get(date) : null;
+                String matchedTime = matchSlotTime(byDate, time);
+                if (matchedTime != null) {
+                    state.pendingRescheduleDetails = false;
+                    state.pendingConfirmReschedule = true;
+                    state.rescheduleDoctorKey = resolvedDoctorKey;
+                    state.rescheduleDate = date;
+                    state.rescheduleTime = matchedTime;
+                    List<Doctor> doctors = appointmentService.getAllDoctors();
+                    String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
+                    return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
+                }
+            }
+        }
+
         if (extracted.intent.equals("reschedule")) {
             Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(fromNumber);
             if (existingSummary.isEmpty()) {
@@ -147,9 +185,12 @@ public class BookingFlowService {
                 String docName = doctors.stream().filter(d -> d.getKey().equals(doctorKey)).findFirst().map(d -> d.getName()).orElse(doctorKey);
                 return Optional.of("You want to reschedule to " + docName + " on " + date + " at " + matchedTime + ". Say yes to confirm.");
             }
+            PendingState s = getOrCreate(callSid);
+            s.pendingRescheduleDetails = true;
+            s.pendingConfirmReschedule = false;
             AppointmentService.AppointmentSummary a = existingSummary.get();
             return Optional.of("Your current appointment is with " + a.doctorName + " on " +
-                    a.slotDate + " at " + a.startTime + ". Please say the new doctor name, date, and time you want.");
+                    a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
         }
 
         if (extracted.intent.equals("book") && StringUtils.isNotBlank(extracted.doctorKey)
@@ -331,22 +372,34 @@ public class BookingFlowService {
         return "Doctor not found. We have " + names + ".";
     }
 
-    /** Normalize user time like "10.30", "2pm", "10:30 to 11:30" to a canonical form for matching. */
+    /** Normalize user time like "10.30", "2pm", "12 p.m.", "10:30 to 11:30" to canonical "HH:MM AM/PM" for slot matching. */
     private String normalizeTimeForSlot(String t) {
-        if (t == null) return null;
+        if (t == null || t.isBlank()) return null;
         t = t.trim();
         if (t.contains(" to ")) t = t.substring(0, t.indexOf(" to ")).trim();
+
+        // Handle "12 p.m.", "12pm", "12 pm" etc. BEFORE dot replacement (dot would corrupt p.m.)
+        if (t.toLowerCase().matches("\\d{1,2}\\s*p\\.?m\\.?")) {
+            String digits = t.replaceAll("\\D", "");
+            int h = digits.isEmpty() ? 12 : Integer.parseInt(digits);
+            int hour = (h == 12 || h == 0) ? 12 : (h % 12);
+            return String.format("%02d:00 PM", hour == 12 ? 12 : hour);
+        }
+        if (t.toLowerCase().matches("\\d{1,2}\\s*a\\.?m\\.?")) {
+            String digits = t.replaceAll("\\D", "");
+            int h = digits.isEmpty() ? 12 : Integer.parseInt(digits);
+            int hour = (h == 12 || h == 0) ? 12 : (h % 12);
+            return String.format("%02d:00 AM", hour == 12 ? 12 : hour);
+        }
+
         t = t.replace('.', ':');
         if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
-        if (t.matches("\\d{1,2}\\.\\d{2}\\s*(AM|PM)")) return t.replace('.', ':');
         if (t.matches("\\d{1,2}:\\d{2}")) {
             int h = Integer.parseInt(t.split(":")[0]);
             String m = t.split(":")[1];
             return (h >= 12 ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m) : String.format("%d:%s AM", h == 0 ? 12 : h, m));
         }
-        if (t.matches("\\d{1,2}\\s*(AM|PM)")) return t.replaceFirst("(\\d{1,2})\\s*(AM|PM)", "$1:00 $2");
-        if (t.toLowerCase().matches("\\d{1,2}\\s*pm")) return t.replaceAll("(?i)pm", "PM").replace(" ", "") + ":00";
-        if (t.toLowerCase().matches("\\d{1,2}\\s*am")) return t.replaceAll("(?i)am", "AM").replace(" ", "") + ":00";
+        if (t.matches("\\d{1,2}\\s*(AM|PM)")) return t.replaceFirst("(?i)(\\d{1,2})\\s*(AM|PM)", "$1:00 $2");
         if (t.matches("\\d{1,2}\\.\\d{2}")) {
             int h = Integer.parseInt(t.split("\\.")[0]);
             String m = t.split("\\.")[1];
@@ -361,16 +414,31 @@ public class BookingFlowService {
         return t;
     }
 
-    /** Find matching slot from available list. Handles "10:30 AM" vs "10.30" etc. */
+    /** Find matching slot from available list. Handles "10:30 AM" vs "10.30", "12 p.m." vs "12:00 PM" etc. */
     private String matchSlotTime(List<String> available, String userTime) {
         if (available == null) return null;
         String norm = normalizeTimeForSlot(userTime);
         if (norm == null) return null;
+        // Normalize to comparable form: "12:00 PM" and "01:00 PM" - allow 1 vs 01
+        String normComparable = toComparableTime(norm);
         for (String s : available) {
+            if (s == null) continue;
             if (s.equalsIgnoreCase(norm)) return s;
-            if (normalizeTimeForSlot(s).equalsIgnoreCase(norm)) return s;
+            if (toComparableTime(s).equals(normComparable)) return s;
+            String slotNorm = normalizeTimeForSlot(s);
+            if (slotNorm != null && toComparableTime(slotNorm).equals(normComparable)) return s;
         }
         return null;
+    }
+
+    /** "12:00 PM" -> "12:00pm", "01:00 PM" -> "1:00pm" for flexible comparison */
+    private static String toComparableTime(String t) {
+        if (t == null) return "";
+        t = t.trim().toLowerCase().replace(" ", "");
+        if (t.startsWith("0") && t.length() > 1 && Character.isDigit(t.charAt(1))) {
+            t = t.replaceFirst("^0+(?=\\d)", "");
+        }
+        return t;
     }
 
     private ExtractedIntent extractIntent(String userText, List<String> conversationSummary, String openAiKey, String openAiModel) {
@@ -394,13 +462,15 @@ public class BookingFlowService {
                 .reduce((a, b) -> a + ", " + b)
                 .orElse("");
 
-        String prompt = "Extract from conversation. Output JSON only.\n" +
+        String todayIso = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
+        String prompt = "Extract from conversation. Output JSON only. Today is " + todayIso + ".\n" +
                 "intent: book|cancel|reschedule|none\n" +
                 "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Output the key (e.g. dr-ahmed) or empty if unclear.\n" +
-                "date: YYYY-MM-DD or tomorrow or today or day after tomorrow\n" +
-                "time: 06:00 PM, 07:00 PM etc. For '6 to 7' use 06:00 PM. For '7 to 8' use 07:00 PM. Use start of range.\n" +
+                "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
+                "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given\n" +
-                "If user only says time (e.g. '7 to 8'), keep doctor from recent context if mentioned.\n\n" +
+                "If user only says time (e.g. '12 p.m. is fine'), keep doctor AND date from recent context (AI's offered slots).\n" +
+                "If user says 'to book tomorrow', output date=tomorrow.\n\n" +
                 "Conversation:\n" + context + "\n\nLast user: " + userText + "\n\nJSON:";
 
         Map<String, Object> body = new HashMap<>();
