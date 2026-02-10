@@ -138,6 +138,61 @@ public class BookingFlowService {
         // Extract intent and entities
         ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
+        // Digits-only input: treat as phone, not time
+        if (StringUtils.isNotBlank(extracted.time) && isLikelyPhoneNumber(extracted.time)) {
+            extracted.time = null;
+            if (StringUtils.isBlank(extracted.patientPhone)) extracted.patientPhone = userText.replaceAll("\\D", "");
+        }
+
+        // Check appointments
+        if (extracted.intent.equals("check_appointments")) {
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            if (list.isEmpty()) return Optional.of("You don't have any active appointment.");
+            String msg = list.size() == 1
+                    ? "You have an appointment for " + list.get(0).patientName + " with " + list.get(0).doctorName + " on " + list.get(0).slotDate + " at " + list.get(0).startTime + "."
+                    : "You have " + list.size() + " appointments: " + list.stream().map(a -> a.patientName + " with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime).reduce((x, y) -> x + "; " + y).orElse("") + ".";
+            return Optional.of(msg);
+        }
+
+        // Ask availability
+        if (extracted.intent.equals("ask_availability")) {
+            Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
+            if (slots.isEmpty()) return Optional.of("No available slots at the moment.");
+            PendingState s = getPending(callSid);
+            String doctorKey = null;
+            if (s != null && s.pendingRescheduleDetails && StringUtils.isNotBlank(s.reschedulePatientName)) {
+                Optional<AppointmentService.AppointmentSummary> cur = appointmentService.getActiveAppointmentSummary(fromNumber, s.reschedulePatientName);
+                if (cur.isPresent()) {
+                    doctorKey = appointmentService.getAllDoctors().stream()
+                            .filter(d -> d.getName().equals(cur.get().doctorName)).findFirst().map(Doctor::getKey).orElse(null);
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+            if (doctorKey != null && slots.containsKey(doctorKey)) {
+                Map<String, List<String>> byDate = slots.get(doctorKey);
+                List<String> samples = new ArrayList<>();
+                for (Map.Entry<String, List<String>> e : byDate.entrySet()) {
+                    for (String t : e.getValue()) {
+                        if (samples.size() >= 3) break;
+                        samples.add(e.getKey() + " at " + t);
+                    }
+                    if (samples.size() >= 3) break;
+                }
+                sb.append("Available slots: ").append(String.join(", ", samples)).append(".");
+            } else {
+                List<String> samples = new ArrayList<>();
+                slots.forEach((dk, byDate) -> {
+                    if (samples.size() >= 3) return;
+                    byDate.forEach((d, times) -> {
+                        if (samples.size() >= 3 || times.isEmpty()) return;
+                        samples.add(dk + " " + d + " " + times.get(0));
+                    });
+                });
+                sb.append("Available: ").append(String.join("; ", samples)).append(". Say doctor, date, and time to book.");
+            }
+            return Optional.of(sb.toString());
+        }
+
         if (extracted.intent.equals("cancel")) {
             List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
             if (list.isEmpty()) {
@@ -196,6 +251,7 @@ public class BookingFlowService {
                 if (matchedTime != null) {
                     state.pendingRescheduleDetails = false;
                     state.pendingConfirmReschedule = true;
+                    state.pendingConfirmCancel = false;
                     state.rescheduleDoctorKey = resolvedDoctorKey;
                     state.rescheduleDate = date;
                     state.rescheduleTime = matchedTime;
@@ -217,6 +273,7 @@ public class BookingFlowService {
                     if (match.isPresent()) {
                         PendingState s = getOrCreate(callSid);
                         s.pendingRescheduleDetails = true;
+                        s.pendingConfirmCancel = false;
                         s.reschedulePatientName = extracted.patientName;
                         AppointmentService.AppointmentSummary a = match.get();
                         return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
@@ -225,6 +282,7 @@ public class BookingFlowService {
                 PendingState s = getOrCreate(callSid);
                 s.pendingChooseRescheduleAppointment = true;
                 s.pendingRescheduleDetails = false;
+                s.pendingConfirmCancel = false;
                 String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
                         .reduce((x, y) -> x + "; " + y).orElse("");
                 return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to reschedule? Say the name.");
@@ -258,7 +316,8 @@ public class BookingFlowService {
             PendingState s = getOrCreate(callSid);
             s.pendingRescheduleDetails = true;
             s.pendingConfirmReschedule = false;
-            s.reschedulePatientName = null;
+            s.pendingConfirmCancel = false;
+            s.reschedulePatientName = existingSummary.get().patientName;
             AppointmentService.AppointmentSummary a = existingSummary.get();
             return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
         }
@@ -535,11 +594,14 @@ public class BookingFlowService {
 
         String todayIso = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         String prompt = "Extract from conversation. Output JSON only. Today is " + todayIso + ".\n" +
-                "intent: book|cancel|reschedule|none\n" +
+                "intent: book|cancel|reschedule|check_appointments|ask_availability|none\n" +
                 "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). Output the matching key or empty if unclear.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given. For cancel/reschedule with multiple appointments, extract the name (e.g. 'cancel Selva's' -> patientName=Selva).\n" +
+                "check_appointments: when user asks 'do I have an appointment', 'what are my appointments', 'list my appointments', 'any appointment for my number'.\n" +
+                "ask_availability: when user asks 'what dates are available', 'what times are available', 'list doctors and slots', 'available dates', 'available times'.\n" +
+                "IMPORTANT: If user says ONLY digits (e.g. 9 2 3 4 5 6 3 2 8 1), output as patientPhone, NOT as time. Never treat 6+ digit sequences as time.\n" +
                 "If user only says time (e.g. '12 p.m. is fine'), keep doctor AND date from recent context (AI's offered slots).\n" +
                 "If user says 'to book tomorrow', output date=tomorrow.\n\n" +
                 "Conversation:\n" + context + "\n\nLast user: " + userText + "\n\nJSON:";
@@ -571,6 +633,13 @@ public class BookingFlowService {
 
     private static String nullIfEmpty(String s) {
         return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    /** Digits-only string with 6+ digits is likely a phone number, not a time. */
+    private static boolean isLikelyPhoneNumber(String s) {
+        if (s == null || s.isBlank()) return false;
+        String digits = s.replaceAll("\\D", "");
+        return digits.length() >= 6;
     }
 
     static class ExtractedIntent {

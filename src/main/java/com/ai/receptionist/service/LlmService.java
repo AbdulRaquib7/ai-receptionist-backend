@@ -95,14 +95,16 @@ public class LlmService {
         }
 
         context.append("\nCRITICAL RULES:\n");
+        context.append("- You already know the caller's phone number from Twilio (fromNumber). NEVER ask for phone verification or 'confirm your number' when the caller is already known.\n");
         context.append("- NEVER use hardcoded or cached doctor names. ONLY use names from the DOCTORS list above.\n");
         context.append("- NEVER hallucinate. If data is missing above, say you don't have that information.\n");
         context.append("- NEVER dump all available slots. When listing slots, mention ONLY 2-3 nearest. Or ask user for preferred time.\n");
+        context.append("- When user asks 'what dates/times are available?' during reschedule: list 2-3 available slots for the same doctor (or ask preferred date/time). Do NOT just repeat the current appointment.\n");
         context.append("- Responses must be SHORT (1-2 sentences) for voice.\n");
-        context.append("- Book flow: 1) Ask user to choose doctor first. 2) Fetch slots for that doctor. 3) Mention 2-3 slots OR ask preferred time. 4) Get name and phone. 5) Confirm. Twilio caller number can be default if user agrees.\n");
-        context.append("- Cancel flow: verify by phone, cancel, confirm.\n");
-        context.append("- Reschedule flow: identify by Twilio caller or user phone, fetch existing, ask new time, update.\n");
-        context.append("- if the user speaks like hangup the call inbetween the booking ask for a confimation to hang up.\n");
+        context.append("- Book flow: 1) Ask user to choose doctor first. 2) Fetch slots for that doctor. 3) Mention 2-3 slots OR ask preferred time. 4) Get name; phone defaults to Twilio caller. 5) Confirm.\n");
+        context.append("- Cancel flow: identify appointment by Twilio caller, cancel, confirm.\n");
+        context.append("- Reschedule flow: identify by Twilio caller, fetch existing, ask new time, update. When asked for available dates in reschedule context, list 2-3 slots for the same doctor.\n");
+        context.append("- If user wants to hang up mid-booking, ask for confirmation before ending.\n");
         context.append("- If slot unavailable: politely ask for different time. Do NOT repeat all slots.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
