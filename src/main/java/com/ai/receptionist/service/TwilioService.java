@@ -51,7 +51,8 @@ public class TwilioService {
 
     /**
      * Same as speakResponse(callSid, aiText). When endCall is true, after speaking
-     * the call is redirected to /goodbye which says "Thank you, goodbye." and hangs up.
+     * the call hangs up. Also schedules explicit REST API hangup to ensure call terminates
+     * (stream redirect alone can leave call connected).
      */
     public void speakResponse(String callSid, String aiText, boolean endCall) {
         if (callSid == null || aiText == null || aiText.isEmpty()) {
@@ -79,6 +80,37 @@ public class TwilioService {
             }
         } catch (Exception e) {
             log.error("Twilio Call Update failed for call {}", callSid, e);
+        }
+
+        if (endCall) {
+            scheduleHangup(callSid);
+        }
+    }
+
+    /** Force-terminate call via REST API after TTS has time to play (~5 sec). */
+    private void scheduleHangup(String callSid) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                hangupCall(callSid);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+    }
+
+    public void hangupCall(String callSid) {
+        if (callSid == null || accountSid == null || accountSid.isEmpty() || authToken == null || authToken.isEmpty()) {
+            return;
+        }
+        String apiUrl = TWILIO_API_BASE + "/Accounts/" + accountSid + "/Calls/" + callSid + ".json";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBasicAuth(accountSid, authToken);
+        try {
+            restTemplate.exchange(apiUrl, org.springframework.http.HttpMethod.DELETE, new HttpEntity<>(headers), String.class);
+            log.info("Terminated call via REST API: {}", callSid);
+        } catch (Exception e) {
+            log.warn("Twilio hangup failed for call {}: {}", callSid, e.getMessage());
         }
     }
 

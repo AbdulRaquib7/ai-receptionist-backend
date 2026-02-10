@@ -47,6 +47,10 @@ public class BookingFlowService {
         public boolean pendingConfirmCancel;
         public boolean pendingConfirmReschedule;
         public boolean pendingRescheduleDetails;  // waiting for user to give new slot
+        public boolean pendingChooseCancelAppointment;   // multiple appts, waiting for user to say which name
+        public boolean pendingChooseRescheduleAppointment;
+        public String cancelPatientName;   // which appointment to cancel (when multiple)
+        public String reschedulePatientName;  // which appointment to reschedule (when multiple)
         public String rescheduleDoctorKey;
         public String rescheduleDate;
         public String rescheduleTime;
@@ -84,9 +88,39 @@ public class BookingFlowService {
             return Optional.of("May I have your name and phone number for the appointment?");
         }
 
+        // User specifying which appointment to cancel (when multiple)
+        if (state != null && state.pendingChooseCancelAppointment) {
+            String name = extractIntent(userText, conversationSummary, openAiKey, openAiModel).patientName;
+            if (StringUtils.isNotBlank(name)) {
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, name);
+                if (match.isPresent()) {
+                    state.pendingChooseCancelAppointment = false;
+                    state.pendingConfirmCancel = true;
+                    state.cancelPatientName = name;
+                    AppointmentService.AppointmentSummary a = match.get();
+                    return Optional.of("You want to cancel " + a.patientName + "'s appointment with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Say yes to confirm.");
+                }
+            }
+        }
+
+        // User specifying which appointment to reschedule (when multiple)
+        if (state != null && state.pendingChooseRescheduleAppointment) {
+            String name = extractIntent(userText, conversationSummary, openAiKey, openAiModel).patientName;
+            if (StringUtils.isNotBlank(name)) {
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, name);
+                if (match.isPresent()) {
+                    state.pendingChooseRescheduleAppointment = false;
+                    state.pendingRescheduleDetails = true;
+                    state.reschedulePatientName = name;
+                    AppointmentService.AppointmentSummary a = match.get();
+                    return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
+                }
+            }
+        }
+
         // Confirm cancel
         if (state != null && state.pendingConfirmCancel && isAffirmative(normalized)) {
-            return confirmCancel(callSid, fromNumber);
+            return confirmCancel(callSid, fromNumber, state.cancelPatientName);
         }
 
         // Confirm reschedule
@@ -105,22 +139,39 @@ public class BookingFlowService {
         ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
         if (extracted.intent.equals("cancel")) {
-            Optional<AppointmentService.AppointmentSummary> existing = appointmentService.getActiveAppointmentSummary(fromNumber);
-            if (existing.isEmpty()) {
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            if (list.isEmpty()) {
                 return Optional.of("You don't have any active appointment to cancel.");
             }
             PendingState s = getOrCreate(callSid);
-            s.pendingConfirmCancel = true;
             s.pendingConfirmBook = false;
             s.pendingConfirmReschedule = false;
-            AppointmentService.AppointmentSummary a = existing.get();
-            return Optional.of("You have an appointment with " + a.doctorName + " on " +
-                    a.slotDate + " at " + a.startTime + ". Say yes to cancel it.");
+            if (list.size() == 1) {
+                s.pendingConfirmCancel = true;
+                s.cancelPatientName = null;
+                AppointmentService.AppointmentSummary a = list.get(0);
+                return Optional.of("You have an appointment for " + a.patientName + " with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Say yes to cancel it.");
+            }
+            if (StringUtils.isNotBlank(extracted.patientName)) {
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, extracted.patientName);
+                if (match.isPresent()) {
+                    s.pendingConfirmCancel = true;
+                    s.cancelPatientName = extracted.patientName;
+                    AppointmentService.AppointmentSummary a = match.get();
+                    return Optional.of("You want to cancel " + a.patientName + "'s appointment with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Say yes to confirm.");
+                }
+            }
+            s.pendingChooseCancelAppointment = true;
+            s.pendingConfirmCancel = false;
+            String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
+                    .reduce((x, y) -> x + "; " + y).orElse("");
+            return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to cancel? Say the name.");
         }
 
         // Reschedule: user previously asked to reschedule, now providing new slot (date/time/doctor)
         if (state != null && state.pendingRescheduleDetails) {
-            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(fromNumber);
+            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(
+                    fromNumber, state.reschedulePatientName);
             if (existingSummary.isEmpty()) {
                 state.pendingRescheduleDetails = false;
                 return Optional.of("You don't have any appointment to reschedule.");
@@ -156,10 +207,29 @@ public class BookingFlowService {
         }
 
         if (extracted.intent.equals("reschedule")) {
-            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(fromNumber);
-            if (existingSummary.isEmpty()) {
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            if (list.isEmpty()) {
                 return Optional.of("You don't have any appointment to reschedule.");
             }
+            if (list.size() > 1) {
+                if (StringUtils.isNotBlank(extracted.patientName)) {
+                    Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, extracted.patientName);
+                    if (match.isPresent()) {
+                        PendingState s = getOrCreate(callSid);
+                        s.pendingRescheduleDetails = true;
+                        s.reschedulePatientName = extracted.patientName;
+                        AppointmentService.AppointmentSummary a = match.get();
+                        return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
+                    }
+                }
+                PendingState s = getOrCreate(callSid);
+                s.pendingChooseRescheduleAppointment = true;
+                s.pendingRescheduleDetails = false;
+                String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
+                        .reduce((x, y) -> x + "; " + y).orElse("");
+                return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to reschedule? Say the name.");
+            }
+            Optional<AppointmentService.AppointmentSummary> existingSummary = Optional.of(list.get(0));
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
                 String doctorKey = normalizeDoctorKey(extracted.doctorKey);
                 if (doctorKey == null) {
@@ -188,9 +258,9 @@ public class BookingFlowService {
             PendingState s = getOrCreate(callSid);
             s.pendingRescheduleDetails = true;
             s.pendingConfirmReschedule = false;
+            s.reschedulePatientName = null;
             AppointmentService.AppointmentSummary a = existingSummary.get();
-            return Optional.of("Your current appointment is with " + a.doctorName + " on " +
-                    a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
+            return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
         }
 
         if (extracted.intent.equals("book") && StringUtils.isNotBlank(extracted.doctorKey)
@@ -298,8 +368,8 @@ public class BookingFlowService {
         return Optional.of("Sorry, that slot was just taken. Please choose another time.");
     }
 
-    private Optional<String> confirmCancel(String callSid, String fromNumber) {
-        boolean ok = appointmentService.cancelAppointment(fromNumber);
+    private Optional<String> confirmCancel(String callSid, String fromNumber, String patientName) {
+        boolean ok = appointmentService.cancelAppointment(fromNumber, patientName);
         clearPending(callSid);
         if (ok) {
             return Optional.of("Your appointment has been cancelled. Thank you.");
@@ -312,7 +382,8 @@ public class BookingFlowService {
             clearPending(callSid);
             return Optional.of("I don't have the new slot. Let's try again.");
         }
-        Optional<Appointment> result = appointmentService.rescheduleAppointment(fromNumber, state.rescheduleDoctorKey, state.rescheduleDate, state.rescheduleTime);
+        Optional<Appointment> result = appointmentService.rescheduleAppointment(
+                fromNumber, state.reschedulePatientName, state.rescheduleDoctorKey, state.rescheduleDate, state.rescheduleTime);
         clearPending(callSid);
         if (result.isPresent()) {
             return Optional.of("Your appointment has been rescheduled. Thank you.");
@@ -468,7 +539,7 @@ public class BookingFlowService {
                 "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). Output the matching key or empty if unclear.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
-                "patientName, patientPhone: from user if given\n" +
+                "patientName, patientPhone: from user if given. For cancel/reschedule with multiple appointments, extract the name (e.g. 'cancel Selva's' -> patientName=Selva).\n" +
                 "If user only says time (e.g. '12 p.m. is fine'), keep doctor AND date from recent context (AI's offered slots).\n" +
                 "If user says 'to book tomorrow', output date=tomorrow.\n\n" +
                 "Conversation:\n" + context + "\n\nLast user: " + userText + "\n\nJSON:";

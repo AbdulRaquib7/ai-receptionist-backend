@@ -69,41 +69,63 @@ public class AppointmentService {
 
     public Optional<Appointment> getActiveAppointmentByTwilioPhone(String twilioPhone) {
         return appointmentRepository
-                .findFirstByPatientTwilioPhoneAndStatusOrderByCreatedAtDesc(
+                .findFirstByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(
                         twilioPhone,
                         Appointment.Status.CONFIRMED
                 );
     }
 
+    public Optional<Appointment> getActiveAppointmentByTwilioPhoneAndPatientName(String twilioPhone, String patientName) {
+        if (patientName == null || patientName.isBlank()) return getActiveAppointmentByTwilioPhone(twilioPhone);
+        return appointmentRepository
+                .findFirstByPatient_TwilioPhoneAndPatient_NameIgnoreCaseAndStatusOrderByCreatedAtDesc(
+                        twilioPhone, patientName.trim(), Appointment.Status.CONFIRMED);
+    }
+
     @Transactional(readOnly = true)
-    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone) {
-
-        Optional<Appointment> opt =
-                appointmentRepository
-                        .findFirstByPatientTwilioPhoneAndStatusOrderByCreatedAtDesc(
-                                twilioPhone,
-                                Appointment.Status.CONFIRMED
-                        );
-
-        if (!opt.isPresent()) return Optional.empty();
-
-        Appointment a = opt.get();
-
-        return Optional.of(
-                new AppointmentSummary(
+    public List<AppointmentSummary> getActiveAppointmentSummaries(String twilioPhone) {
+        List<Appointment> list = appointmentRepository
+                .findByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(twilioPhone, Appointment.Status.CONFIRMED);
+        return list.stream()
+                .map(a -> new AppointmentSummary(
+                        a.getPatient().getName(),
                         a.getDoctor().getName(),
                         a.getSlot().getSlotDate().toString(),
                         a.getSlot().getStartTime()
-                )
-        );
+                ))
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone) {
+        List<AppointmentSummary> list = getActiveAppointmentSummaries(twilioPhone);
+        return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone, String patientName) {
+        if (patientName == null || patientName.isBlank()) return getActiveAppointmentSummary(twilioPhone);
+        Optional<Appointment> opt = appointmentRepository
+                .findFirstByPatient_TwilioPhoneAndPatient_NameIgnoreCaseAndStatusOrderByCreatedAtDesc(
+                        twilioPhone, patientName.trim(), Appointment.Status.CONFIRMED);
+        if (!opt.isPresent()) return Optional.empty();
+        Appointment a = opt.get();
+        return Optional.of(new AppointmentSummary(
+                a.getPatient().getName(),
+                a.getDoctor().getName(),
+                a.getSlot().getSlotDate().toString(),
+                a.getSlot().getStartTime()
+        ));
     }
 
     public static class AppointmentSummary {
+        public final String patientName;
         public final String doctorName;
         public final String slotDate;
         public final String startTime;
 
-        public AppointmentSummary(String doctorName, String slotDate, String startTime) {
+        public AppointmentSummary(String patientName, String doctorName, String slotDate, String startTime) {
+            this.patientName = patientName;
             this.doctorName = doctorName;
             this.slotDate = slotDate;
             this.startTime = startTime;
@@ -151,12 +173,20 @@ public class AppointmentService {
             return Optional.empty();
         }
 
-        Patient patient = Patient.builder()
-                .name(StringUtils.hasText(patientName) ? patientName : "Unknown")
-                .phone(StringUtils.hasText(patientPhone) ? patientPhone : twilioPhone)
-                .twilioPhone(twilioPhone)
-                .build();
-
+        // Find or create patient by twilio + name - same number can have multiple appointments (different people)
+        String name = StringUtils.hasText(patientName) ? patientName : "Unknown";
+        Patient patient = patientRepository
+                .findFirstByTwilioPhoneAndNameIgnoreCase(twilioPhone, name)
+                .orElse(null);
+        if (patient == null) {
+            patient = Patient.builder()
+                    .name(name)
+                    .phone(StringUtils.hasText(patientPhone) ? patientPhone : twilioPhone)
+                    .twilioPhone(twilioPhone)
+                    .build();
+        } else if (StringUtils.hasText(patientPhone)) {
+            patient.setPhone(patientPhone);
+        }
         patient = patientRepository.save(patient);
 
         AppointmentSlot slot = slotOpt.get();
@@ -189,8 +219,12 @@ public class AppointmentService {
 
     @Transactional
     public boolean cancelAppointment(String twilioPhone) {
+        return cancelAppointment(twilioPhone, null);
+    }
 
-        Optional<Appointment> opt = getActiveAppointmentByTwilioPhone(twilioPhone);
+    @Transactional
+    public boolean cancelAppointment(String twilioPhone, String patientName) {
+        Optional<Appointment> opt = getActiveAppointmentByTwilioPhoneAndPatientName(twilioPhone, patientName);
         if (!opt.isPresent()) return false;
 
         Appointment appt = opt.get();
@@ -201,19 +235,24 @@ public class AppointmentService {
         slot.setStatus(AppointmentSlot.Status.AVAILABLE);
         slotRepository.save(slot);
 
-        log.info("Cancelled appointment for {}", twilioPhone);
+        log.info("Cancelled appointment for {} ({})", twilioPhone, appt.getPatient().getName());
         return true;
+    }
+
+    @Transactional
+    public Optional<Appointment> rescheduleAppointment(String twilioPhone, String doctorKey, String newDate, String newTime) {
+        return rescheduleAppointment(twilioPhone, null, doctorKey, newDate, newTime);
     }
 
     @Transactional
     public Optional<Appointment> rescheduleAppointment(
             String twilioPhone,
+            String patientName,
             String doctorKey,
             String newDate,
             String newTime
     ) {
-
-        Optional<Appointment> existingOpt = getActiveAppointmentByTwilioPhone(twilioPhone);
+        Optional<Appointment> existingOpt = getActiveAppointmentByTwilioPhoneAndPatientName(twilioPhone, patientName);
         if (!existingOpt.isPresent()) return Optional.empty();
 
         Appointment existing = existingOpt.get();

@@ -78,14 +78,18 @@ public class LlmService {
             context.append(docKey).append(": ").append(byDate.toString()).append("\n");
         });
 
-        Optional<AppointmentService.AppointmentSummary> existing = StringUtils.isNotBlank(fromNumber)
-                ? appointmentService.getActiveAppointmentSummary(fromNumber)
-                : Optional.empty();
-        if (existing.isPresent()) {
-            AppointmentService.AppointmentSummary a = existing.get();
-            context.append("\nCALLER'S EXISTING APPOINTMENT: ").append(a.doctorName)
-                    .append(" on ").append(a.slotDate)
-                    .append(" at ").append(a.startTime).append("\n");
+        List<AppointmentService.AppointmentSummary> appointments = StringUtils.isNotBlank(fromNumber)
+                ? appointmentService.getActiveAppointmentSummaries(fromNumber)
+                : List.of();
+        if (!appointments.isEmpty()) {
+            context.append("\nCALLER'S APPOINTMENT(S): ");
+            for (int i = 0; i < appointments.size(); i++) {
+                AppointmentService.AppointmentSummary a = appointments.get(i);
+                if (i > 0) context.append(" | ");
+                context.append(a.patientName).append(" with ").append(a.doctorName)
+                        .append(" on ").append(a.slotDate).append(" at ").append(a.startTime);
+            }
+            context.append("\n");
         } else {
             context.append("\nCALLER HAS NO EXISTING APPOINTMENT.\n");
         }

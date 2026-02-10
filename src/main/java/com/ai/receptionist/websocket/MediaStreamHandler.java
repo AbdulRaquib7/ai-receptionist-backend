@@ -163,7 +163,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
 
         // AI said explicit closing (e.g. after "Your appointment is confirmed. Have a great day!")
-        if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")) {
+        if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")
+                || ai.contains("has been cancelled") || ai.contains("has been rescheduled")) {
             return true;
         }
 

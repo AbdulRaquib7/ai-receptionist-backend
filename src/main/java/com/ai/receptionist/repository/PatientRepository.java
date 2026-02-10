@@ -7,4 +7,5 @@ import java.util.Optional;
 
 public interface PatientRepository extends JpaRepository<Patient, Long> {
     Optional<Patient> findByTwilioPhone(String twilioPhone);
+    Optional<Patient> findFirstByTwilioPhoneAndNameIgnoreCase(String twilioPhone, String name);
 }
