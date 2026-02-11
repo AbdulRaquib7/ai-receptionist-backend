@@ -54,6 +54,12 @@ public class BookingFlowService {
         public String rescheduleDoctorKey;
         public String rescheduleDate;
         public String rescheduleTime;
+
+        public boolean hasAnyPending() {
+            return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
+                    || pendingConfirmReschedule || pendingRescheduleDetails
+                    || pendingChooseCancelAppointment || pendingChooseRescheduleAppointment;
+        }
     }
 
     /**
@@ -392,8 +398,11 @@ public class BookingFlowService {
     }
 
     private boolean isAffirmative(String s) {
-        return s.contains("yes") || s.contains("yeah") || s.contains("yep") || s.contains("correct")
-                || s.contains("ok") || s.contains("sure") || s.contains("confirm");
+        if (s == null || s.isBlank()) return false;
+        String t = s.trim().toLowerCase();
+        return t.equals("yes") || t.equals("yeah") || t.equals("yep") || t.equals("ya") || t.equals("ok") || t.equals("sure")
+                || t.contains("yes") || t.contains("yeah") || t.contains("yep") || t.contains("correct")
+                || t.contains("ok") || t.contains("sure") || t.contains("confirm");
     }
 
     private boolean isNegative(String s) {

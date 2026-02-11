@@ -40,7 +40,7 @@ public class VoiceController {
     private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
         String from = params != null ? params.getOrDefault("From", "") : "";
         String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">How can I help you? You can book, reschedule, or cancel an appointment.</Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">How can I help you? You can book, reschedule, or cancel an appointment.</prosody></Say>";
         String streamParams = "";
         if (StringUtils.hasText(from)) {
             streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";
@@ -59,7 +59,7 @@ public class VoiceController {
             return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
         }
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(text) + "</prosody></Say>";
         if (endCall) {
             // Hang up immediately after speaking - no redirect, more reliable
             String twiml = "<Response>" + sayTwiml + "<Hangup/></Response>";
@@ -76,7 +76,7 @@ public class VoiceController {
 
     @RequestMapping(value = "/twilio/voice/goodbye", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> goodbye() {
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Thank you, goodbye.</Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">Thank you, goodbye.</prosody></Say>";
         String hangupTwiml = "<Hangup/>";
         String twiml = "<Response>" + sayTwiml + hangupTwiml + "</Response>";
         log.info("Conversation ended -> hanging up call");

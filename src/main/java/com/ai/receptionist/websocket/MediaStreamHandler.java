@@ -152,24 +152,36 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
+    private static boolean isShortAffirmativeOrNegative(String s) {
+        if (s == null || s.length() > 10) return false;
+        String t = s.trim().toLowerCase();
+        return t.matches("yes|yeah|yep|ya|ok|okay|no|nope|sure|confirm");
+    }
+
     /**
      * Returns true if the exchange indicates the conversation is over.
-     * Uses stricter user-side checks to avoid false hangups from background noise
-     * (e.g. STT mishearing noise as "bye", "thanks").
+     * When hasPending is true (e.g. waiting for user to say name or confirm), only end on explicit
+     * AI confirmation to avoid false hangups from STT mishearing (e.g. "Arun" -> "thank you bye").
      */
-    private boolean isConversationEnded(String aiReply, String userMessage) {
+    private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
 
-        // AI said explicit closing (e.g. after "Your appointment is confirmed. Have a great day!")
-        if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")
-                || ai.contains("has been cancelled") || ai.contains("has been rescheduled")) {
+        // AI said explicit confirmation/closing
+        if (ai.contains("has been cancelled") || ai.contains("has been rescheduled")
+                || ai.contains("appointment is confirmed") || ai.contains("thank you. have a great day")) {
             return true;
         }
 
-        // User-triggered: require longer phrase to avoid noise ("bye", "thanks" alone often misheard)
-        if (user.length() < 8) return false;
+        // AI said generic goodbye - only end if we're NOT in a flow (avoid ending when STT misheard)
+        if (!hasPending && (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call"))) {
+            return true;
+        }
+
+        // User-triggered: require longer phrase to avoid noise; when pending, be extra strict
+        if (hasPending) return false;
+        if (user.length() < 10) return false;
         if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")) {
             return true;
         }
@@ -192,7 +204,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 }
 
                 String userText = sttService.transcribe(audio);
-                if (StringUtils.isBlank(userText) || userText.length() < 5) return;
+                if (StringUtils.isBlank(userText)) return;
+                if (userText.length() < 2) return;
+                if (userText.length() < 5 && !isShortAffirmativeOrNegative(userText)) return;
 
                 String fromNumber = state.fromNumber != null ? state.fromNumber : "";
                 log.info("USER | {}", userText);
@@ -210,7 +224,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, fromNumber, aiText);
 
-                boolean endCall = isConversationEnded(aiText, userText);
+                boolean hasPending = bookingFlowService.getPending(callSid) != null
+                        && bookingFlowService.getPending(callSid).hasAnyPending();
+                boolean endCall = isConversationEnded(aiText, userText, hasPending);
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }

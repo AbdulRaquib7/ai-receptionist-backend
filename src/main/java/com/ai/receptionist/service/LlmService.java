@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * Generates replies using OpenAI Chat Completions.
@@ -73,9 +72,16 @@ public class LlmService {
         }
 
         Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
-        context.append("\nAVAILABLE SLOTS (from appointment_slot where status=AVAILABLE):\n");
+        context.append("\nAVAILABLE SLOTS (from appointment_slot where status=AVAILABLE). Format as ranges when consecutive: e.g. 6,7,8,9 PM -> '6 to 9 PM' or '6-9 PM'.\n");
         slots.forEach((docKey, byDate) -> {
-            context.append(docKey).append(": ").append(byDate.toString()).append("\n");
+            context.append(docKey).append(": ");
+            List<String> rangeLines = new ArrayList<>();
+            byDate.forEach((date, times) -> {
+                if (times != null && !times.isEmpty()) {
+                    rangeLines.add(date + " " + formatSlotsAsRanges(times));
+                }
+            });
+            context.append(String.join("; ", rangeLines)).append("\n");
         });
 
         List<AppointmentService.AppointmentSummary> appointments = StringUtils.isNotBlank(fromNumber)
@@ -97,7 +103,7 @@ public class LlmService {
         context.append("\nCRITICAL RULES:\n");
         context.append("- NEVER use hardcoded or cached doctor names. ONLY use names from the DOCTORS list above.\n");
         context.append("- NEVER hallucinate. If data is missing above, say you don't have that information.\n");
-        context.append("- NEVER dump all available slots. When listing slots, mention ONLY 2-3 nearest. Or ask user for preferred time.\n");
+        context.append("- NEVER dump all available slots. When listing slots, use RANGES: e.g. if 6,7,8,9 PM available say '6 to 9 PM' so user can pick any time in between. Mention 2-3 dates with ranges. Or ask preferred time.\n");
         context.append("- Responses must be SHORT (1-2 sentences) for voice.\n");
         context.append("- Book flow: 1) Ask user to choose doctor first. 2) Fetch slots for that doctor. 3) Mention 2-3 slots OR ask preferred time. 4) Get name and phone. 5) Confirm. Twilio caller number can be default if user agrees.\n");
         context.append("- Cancel flow: verify by phone, cancel, confirm.\n");
@@ -131,5 +137,64 @@ public class LlmService {
             log.error("Failed to get LLM reply", ex);
             return "";
         }
+    }
+
+    /**
+     * Format slot times as human-readable ranges. E.g. [06:00 PM, 07:00 PM, 08:00 PM, 09:00 PM] -> "6 to 9 PM".
+     * Consecutive half-hour slots are grouped.
+     */
+    public static String formatSlotsAsRanges(List<String> times) {
+        if (times == null || times.isEmpty()) return "";
+        List<Integer> minutesFromMidnight = new ArrayList<>();
+        for (String t : times) {
+            Integer m = parseTimeToMinutes(t);
+            if (m != null) minutesFromMidnight.add(m);
+        }
+        if (minutesFromMidnight.isEmpty()) return times.toString();
+        minutesFromMidnight.sort(Integer::compareTo);
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (i < minutesFromMidnight.size()) {
+            int start = minutesFromMidnight.get(i);
+            int end = start;
+            while (i + 1 < minutesFromMidnight.size() && minutesFromMidnight.get(i + 1) <= end + 35) {
+                i++;
+                end = minutesFromMidnight.get(i);
+            }
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(minutesToDisplay(start)).append(" to ").append(minutesToDisplay(end));
+            i++;
+        }
+        return sb.toString();
+    }
+
+    private static Integer parseTimeToMinutes(String t) {
+        if (t == null || t.isBlank()) return null;
+        t = t.trim();
+        boolean pm = t.toLowerCase().contains("pm") && !t.toLowerCase().contains("12:00 am");
+        boolean am = t.toLowerCase().contains("am");
+        String[] parts = t.replaceAll("(?i)(am|pm)", "").trim().split("[:.]");
+        if (parts.length < 1) return null;
+        int h = 0, m = 0;
+        try {
+            h = Integer.parseInt(parts[0].trim());
+            if (parts.length >= 2) m = Integer.parseInt(parts[1].trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (pm && h != 12) h += 12;
+        if (am && h == 12) h = 0;
+        return h * 60 + m;
+    }
+
+    private static String minutesToDisplay(int mins) {
+        int h = mins / 60;
+        int m = mins % 60;
+        if (h >= 12) {
+            if (h > 12) h -= 12;
+            return m > 0 ? String.format("%d:%02d PM", h, m) : String.format("%d PM", h);
+        }
+        if (h == 0) h = 12;
+        return m > 0 ? String.format("%d:%02d AM", h, m) : String.format("%d AM", h);
     }
 }
