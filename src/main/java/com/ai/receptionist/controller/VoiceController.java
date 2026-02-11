@@ -3,6 +3,7 @@ package com.ai.receptionist.controller;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import com.ai.receptionist.service.ResponsePhrases;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
@@ -27,6 +28,12 @@ public class VoiceController {
     @Value("${twilio.base-url:}")
     private String baseUrl;
 
+    private final ResponsePhrases responsePhrases;
+
+    public VoiceController(ResponsePhrases responsePhrases) {
+        this.responsePhrases = responsePhrases;
+    }
+
     @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> inbound(@RequestParam(required = false) Map<String, String> params) {
         return inboundTwiMl(params);
@@ -40,7 +47,7 @@ public class VoiceController {
     private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
         String from = params != null ? params.getOrDefault("From", "") : "";
         String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">How can I help you? You can book, reschedule, or cancel an appointment.</prosody></Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(responsePhrases.greeting()) + "</prosody></Say>";
         String streamParams = "";
         if (StringUtils.hasText(from)) {
             streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";
