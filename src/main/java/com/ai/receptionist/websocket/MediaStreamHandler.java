@@ -152,19 +152,24 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
+    private static boolean isShortAffirmativeOrNegative(String s) {
+        if (s == null || s.length() > 12) return false;
+        String t = s.trim().toLowerCase();
+        return t.matches("yes|yeah|yep|ya|ok|okay|no|nope|sure|confirm|cancel");
+    }
+
     /**
      * Returns true if the exchange indicates the conversation is over.
-     * Uses stricter user-side checks to avoid false hangups from background noise
-     * (e.g. STT mishearing noise as "bye", "thanks").
      */
     private boolean isConversationEnded(String aiReply, String userMessage) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
 
-        // AI said explicit closing (e.g. after "Your appointment is confirmed. Have a great day!")
-        if (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call")
-                || ai.contains("has been cancelled") || ai.contains("has been rescheduled")) {
+        // AI said explicit closing
+        if (ai.contains("goodbye") || ai.contains("take care") || ai.contains("have a great day")
+                || ai.contains("has been cancelled") || ai.contains("has been rescheduled")
+                || ai.contains("appointment is confirmed")) {
             return true;
         }
 
@@ -192,7 +197,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 }
 
                 String userText = sttService.transcribe(audio);
-                if (StringUtils.isBlank(userText) || userText.length() < 5) return;
+                if (StringUtils.isBlank(userText)) return;
+                if (userText.length() < 2) return;
+                if (userText.length() < 5 && !isShortAffirmativeOrNegative(userText)) return;
 
                 String fromNumber = state.fromNumber != null ? state.fromNumber : "";
                 log.info("USER | {}", userText);

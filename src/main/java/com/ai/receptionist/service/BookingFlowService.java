@@ -49,11 +49,19 @@ public class BookingFlowService {
         public boolean pendingRescheduleDetails;  // waiting for user to give new slot
         public boolean pendingChooseCancelAppointment;   // multiple appts, waiting for user to say which name
         public boolean pendingChooseRescheduleAppointment;
+        public boolean pendingConfirmAbort;   // user said no to confirm; waiting for "start over" or "end call"
         public String cancelPatientName;   // which appointment to cancel (when multiple)
         public String reschedulePatientName;  // which appointment to reschedule (when multiple)
         public String rescheduleDoctorKey;
         public String rescheduleDate;
         public String rescheduleTime;
+
+        public boolean hasAnyPending() {
+            return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
+                    || pendingConfirmReschedule || pendingRescheduleDetails
+                    || pendingChooseCancelAppointment || pendingChooseRescheduleAppointment
+                    || pendingConfirmAbort;
+        }
     }
 
     /**
@@ -128,11 +136,32 @@ public class BookingFlowService {
             return confirmReschedule(callSid, fromNumber, state);
         }
 
-        // User declined
-        if (state != null && (state.pendingConfirmBook || state.pendingConfirmCancel || state.pendingConfirmReschedule)
-                && isNegative(normalized)) {
+        // User said "no" to confirm cancel/reschedule -> ask whether to start over or end call
+        if (state != null && (state.pendingConfirmCancel || state.pendingConfirmReschedule) && isNegative(normalized)) {
+            state.pendingConfirmCancel = false;
+            state.pendingConfirmReschedule = false;
+            state.pendingConfirmAbort = true;
+            return Optional.of("No problem, I won't make any changes. Would you like to do something else, or shall I end the call?");
+        }
+
+        // User said "no" to confirm book -> just clear and offer help
+        if (state != null && state.pendingConfirmBook && isNegative(normalized)) {
             clearPending(callSid);
-            return Optional.of("Okay, no changes made. How else can I help you?");
+            return Optional.of("Sure, no problem. What would you like to do?");
+        }
+
+        // Pending abort: user chose "end call" or "start over" or said something new (e.g. "I want to book")
+        if (state != null && state.pendingConfirmAbort) {
+            if (wantsToEndCall(normalized)) {
+                clearPending(callSid);
+                return Optional.of("Goodbye! Take care.");
+            }
+            if (wantsToStartOver(normalized)) {
+                clearPending(callSid);
+                return Optional.of("Sure thing! What can I help you with?");
+            }
+            state.pendingConfirmAbort = false;
+            // Fall through to handle new intent (e.g. "I want to book an appointment")
         }
 
         // Extract intent and entities
@@ -451,12 +480,33 @@ public class BookingFlowService {
     }
 
     private boolean isAffirmative(String s) {
-        return s.contains("yes") || s.contains("yeah") || s.contains("yep") || s.contains("correct")
-                || s.contains("ok") || s.contains("sure") || s.contains("confirm");
+        if (s == null || s.isBlank()) return false;
+        String t = s.trim().toLowerCase();
+        return t.equals("yes") || t.equals("yeah") || t.equals("yep") || t.equals("ya") || t.equals("ok") || t.equals("okay") || t.equals("sure")
+                || t.contains("yes") || t.contains("yeah") || t.contains("yep") || t.contains("correct")
+                || t.contains("ok") || t.contains("sure") || t.contains("confirm");
     }
 
     private boolean isNegative(String s) {
-        return s.matches("no|nope|cancel|never mind|don't|dont") || (s.length() < 20 && s.contains("no"));
+        if (s == null || s.isBlank()) return false;
+        String t = s.trim().toLowerCase();
+        return t.equals("no") || t.equals("nope") || t.equals("cancel") || t.equals("never mind") || t.equals("don't") || t.equals("dont")
+                || (t.length() < 25 && (t.contains("no ") || t.startsWith("no,") || t.equals("no")));
+    }
+
+    private boolean wantsToEndCall(String s) {
+        if (s == null || s.isBlank()) return false;
+        String t = s.trim().toLowerCase();
+        return t.contains("end") || t.contains("hang up") || t.contains("hangup") || t.contains("bye")
+                || t.contains("goodbye") || t.contains("that's all") || t.contains("nothing else")
+                || (t.length() <= 5 && (t.equals("no") || t.equals("bye")));
+    }
+
+    private boolean wantsToStartOver(String s) {
+        if (s == null || s.isBlank()) return false;
+        String t = s.trim().toLowerCase();
+        return t.contains("something else") || t.contains("start over") || t.contains("continue")
+                || t.contains("try again") || t.contains("yes") || t.equals("sure");
     }
 
     private PendingState getOrCreate(String callSid) {
