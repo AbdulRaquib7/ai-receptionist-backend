@@ -1,5 +1,6 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.conversation.ConversationIntent;
 import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Doctor;
 import com.ai.receptionist.conversation.ConversationState;
@@ -31,15 +32,18 @@ public class BookingFlowService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final YesNoClassifier yesNoClassifier;
     private final ResponsePhrases phrases;
+    private final IntentClassifier intentClassifier;
 
     private final Map<String, PendingState> pendingByCall = new ConcurrentHashMap<>();
 
     public BookingFlowService(AppointmentService appointmentService, RestTemplateBuilder builder,
-                              YesNoClassifier yesNoClassifier, ResponsePhrases phrases) {
+                              YesNoClassifier yesNoClassifier, ResponsePhrases phrases,
+                              IntentClassifier intentClassifier) {
         this.appointmentService = appointmentService;
         this.restTemplate = builder.build();
         this.yesNoClassifier = yesNoClassifier;
         this.phrases = phrases;
+        this.intentClassifier = intentClassifier;
     }
 
     public static class PendingState {
@@ -62,6 +66,8 @@ public class BookingFlowService {
         public String rescheduleDate;
         public String rescheduleTime;
         public ConversationState currentState = ConversationState.START;
+        /** Locked after booking completes; prevents duplicate confirmation. */
+        public boolean bookingLocked;
 
         public boolean hasAnyPending() {
             return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
@@ -81,9 +87,14 @@ public class BookingFlowService {
         String normalized = userText.toLowerCase().trim();
         PendingState state = pendingByCall.get(callSid);
 
-        // Confirm booking
-        if (state != null && state.pendingConfirmBook && yesNoClassifier.isAffirmative(userText)) {
-            return confirmBook(callSid, fromNumber, state);
+        // Confirm booking - with interrupt guard
+        if (state != null && state.pendingConfirmBook && !state.bookingLocked) {
+            if (intentClassifier.isInterruptRequestingDoctorInfo(userText, true)) {
+                return Optional.empty();
+            }
+            if (intentClassifier.classify(userText, true) == ConversationIntent.CONFIRM_YES) {
+                return confirmBook(callSid, fromNumber, state);
+            }
         }
 
         // Provide name/phone when asked
@@ -192,35 +203,42 @@ public class BookingFlowService {
             return Optional.of(sb.append(".").toString());
         }
 
-        if (extracted.intent.equals("ask_availability")) {
+        if (extracted.intent.equals("ask_availability") && intentClassifier.classify(userText, false) != ConversationIntent.ASK_DOCTOR_INFO) {
             Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
             if (slots.isEmpty()) return Optional.of("No slots at the moment.");
             PendingState s = getPending(callSid);
-            Optional<String> doctorKeyOpt = Optional.empty();
+            String doctorKey = null;
             if (s != null && s.pendingRescheduleDetails && StringUtils.isNotBlank(s.reschedulePatientName)) {
-                doctorKeyOpt = appointmentService.getActiveAppointmentSummary(fromNumber, s.reschedulePatientName)
+                doctorKey = appointmentService.getActiveAppointmentSummary(fromNumber, s.reschedulePatientName)
                         .flatMap(a -> appointmentService.getAllDoctors().stream()
                                 .filter(d -> d.getName().equals(a.doctorName))
                                 .findFirst()
-                                .map(Doctor::getKey));
+                                .map(Doctor::getKey))
+                        .orElse(null);
             }
+            if (doctorKey == null && extracted.doctorKey != null) {
+                doctorKey = normalizeDoctorKey(extracted.doctorKey);
+            }
+            if (doctorKey == null && s != null && StringUtils.isNotBlank(s.doctorKey)) {
+                doctorKey = s.doctorKey;
+            }
+            if (doctorKey == null) {
+                return Optional.of("Which doctor would you like me to check slots for?");
+            }
+            if (!slots.containsKey(doctorKey)) {
+                return Optional.of("No slots for that doctor at the moment.");
+            }
+            final String resolvedDoctorKey = doctorKey;
+            PendingState stateForBook = getOrCreate(callSid);
+            stateForBook.doctorKey = resolvedDoctorKey;
             List<String> samples = new ArrayList<>();
-            String doctorKey = doctorKeyOpt.orElse(null);
-            if (doctorKey != null && slots.containsKey(doctorKey)) {
-                slots.get(doctorKey).forEach((date, times) -> {
-                    if (samples.size() < 3 && times != null && !times.isEmpty())
-                        samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
-                });
-            } else {
-                slots.forEach((dk, byDate) -> {
-                    if (samples.size() >= 3) return;
-                    byDate.forEach((d, times) -> {
-                        if (samples.size() < 3 && times != null && !times.isEmpty())
-                            samples.add(dk + " " + d + ": " + LlmService.formatSlotsAsRanges(times));
-                    });
-                });
-            }
-            return Optional.of("We've got slots — " + String.join("; ", samples) + ". Pick a time that works.");
+            slots.get(resolvedDoctorKey).forEach((date, times) -> {
+                if (samples.size() < 3 && times != null && !times.isEmpty())
+                    samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
+            });
+            List<Doctor> doctors = appointmentService.getAllDoctors();
+            String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
+            return Optional.of("Slots for " + docName + " — " + String.join("; ", samples) + ". Pick a time that works.");
         }
 
         if (extracted.intent.equals("cancel")) {
@@ -439,6 +457,12 @@ public class BookingFlowService {
     }
 
     private Optional<String> confirmBook(String callSid, String fromNumber, PendingState state) {
+        if (!state.pendingConfirmBook) {
+            throw new IllegalStateException("Booking attempted without confirmation.");
+        }
+        if (state.bookingLocked) {
+            return Optional.of(phrases.bookingConfirmed());
+        }
         if (StringUtils.isBlank(state.doctorKey) || state.date == null || StringUtils.isBlank(state.time)) {
             clearPending(callSid);
             return Optional.of("I don't have the full booking details. Let's try again.");
@@ -446,11 +470,13 @@ public class BookingFlowService {
         String twilioPhone = StringUtils.isNotBlank(fromNumber) ? fromNumber : state.patientPhone;
         Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName, state.patientPhone,
                 state.doctorKey, state.date, state.time);
-        clearPending(callSid);
+        state.bookingLocked = true;
         if (result.isPresent()) {
             log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey, state.date, state.time);
+            clearPending(callSid);
             return Optional.of(phrases.bookingConfirmed());
         }
+        state.bookingLocked = false;
         return Optional.of(phrases.slotUnavailable());
     }
 
@@ -627,7 +653,7 @@ public class BookingFlowService {
                 "intent: book|cancel|reschedule|check_appointments|ask_availability|none\n" +
                 "check_appointments: 'do I have an appointment', 'what are my appointments', 'any appointment for my number'.\n" +
                 "ask_availability: 'what dates/times available', 'available slots', 'list doctors and slots'.\n" +
-                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). Output the matching key or empty if unclear.\n" +
+                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). For ask_availability, if AI just recommended a doctor (e.g. 'Dr John... would you like me to check slots?') and user says 'yes/sure/check slots', extract that doctor's key from the AI message. Output the matching key or empty if unclear.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given. For cancel/reschedule with multiple appointments, extract the name (e.g. 'cancel Selva's' -> patientName=Selva).\n" +

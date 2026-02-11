@@ -82,21 +82,8 @@ public class TwilioService {
             log.error("Twilio Call Update failed for call {}", callSid, e);
         }
 
-        if (endCall) {
-            scheduleHangup(callSid);
-        }
-    }
-
-    /** Force-terminate call via REST API after TTS has time to play (~5 sec). */
-    private void scheduleHangup(String callSid) {
-        new Thread(() -> {
-            try {
-                Thread.sleep(5000);
-                hangupCall(callSid);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }).start();
+        // When endCall=true, redirect URL returns TwiML with <Hangup/>. Do NOT call REST DELETE -
+        // it causes 409 "Call cannot be deleted because it is still in progress" while TwiML is executing.
     }
 
     public void hangupCall(String callSid) {
