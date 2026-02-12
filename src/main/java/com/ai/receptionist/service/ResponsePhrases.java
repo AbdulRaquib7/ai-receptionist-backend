@@ -17,6 +17,10 @@ public class ResponsePhrases {
         return "Alright, so that's " + doctorName + " on " + date + " at " + time + ". Want me to confirm that?";
     }
 
+    public String confirmAfterDoctorInfo() {
+        return "Would you like me to confirm the appointment now?";
+    }
+
     public String bookingConfirmed() {
         return "Awesome! You're all set. You'll get a reminder too. Anything else I can help with?";
     }

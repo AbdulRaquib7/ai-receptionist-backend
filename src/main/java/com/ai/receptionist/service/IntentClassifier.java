@@ -1,24 +1,28 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.conversation.ConversationIntent;
+import com.ai.receptionist.conversation.IntentResult;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
+import java.util.EnumSet;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Disambiguates user intent. ASK_DOCTOR_INFO must never trigger slot fetch or booking.
+ * Multi-intent classifier. Detects all intents in user text; supports conflict resolution
+ * (e.g. CONFIRM_YES + ASK_DOCTOR_INFO → ASK_DOCTOR_INFO takes precedence).
  */
 @Service
 public class IntentClassifier {
 
     private static final Pattern ASK_DOCTOR_INFO = Pattern.compile(
-            "\\b(tell me about|tell about|about (dr\\.?|doctor)|what('s| is) (dr\\.?|doctor)|know about|before that|before (i |we )?confirm|describe|info about)\\b",
+            "\\b(tell me about|tell about|about (dr\\.?|doctor)|what('s| is) (dr\\.?|doctor)|know about|before that|before (i |we )?confirm|describe|info about|can you tell about)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
     private static final Pattern CONFIRM_YES = Pattern.compile(
-            "\\b(yes|yeah|yep|yup|ok|okay|sure|confirm|correct|right|absolutely|definitely)\\b",
+            "\\b(yes|yeah|yep|yup|ok|okay|sure|confirm|confirmed|correct|right|absolutely|definitely)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -29,6 +33,11 @@ public class IntentClassifier {
 
     private static final Pattern REQUEST_SLOTS = Pattern.compile(
             "\\b(slots?|availability|available|times?|dates?|schedule|when (is|are)|check (slots?|availability))\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    private static final Pattern CHANGE_DOCTOR = Pattern.compile(
+            "\\b(different doctor|another doctor|switch|change doctor|other doctor)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -52,52 +61,96 @@ public class IntentClassifier {
             Pattern.CASE_INSENSITIVE
     );
 
+    private static final Pattern PROVIDE_DETAILS = Pattern.compile(
+            "\\b(name is|phone is|number is|my name|call me|i'm |i am |\\d{3}[-. ]?\\d{3}[-. ]?\\d{4})\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
     /**
-     * Classify intent. Interrupt phrases (ask doctor info during confirm) take precedence.
+     * Multi-intent classification. Returns all detected intents and whether they conflict.
+     * Example: "Yes confirm, but before that tell me about Dr John" → {CONFIRM_YES, ASK_DOCTOR_INFO}, hasConflict=true
      */
-    public ConversationIntent classify(String userText, boolean awaitingBookingConfirmation) {
-        if (userText == null || userText.isBlank()) return ConversationIntent.NONE;
+    public IntentResult classifyMulti(String userText, boolean awaitingBookingConfirmation) {
+        if (userText == null || userText.isBlank()) return IntentResult.empty();
         String t = userText.trim();
+        Set<ConversationIntent> intents = EnumSet.noneOf(ConversationIntent.class);
 
-        if (awaitingBookingConfirmation && ASK_DOCTOR_INFO.matcher(t).find()) {
-            return ConversationIntent.ASK_DOCTOR_INFO;
+        boolean hasAskDoctorInfo = ASK_DOCTOR_INFO.matcher(t).find();
+        boolean hasConfirmYes = CONFIRM_YES.matcher(t).find();
+        boolean hasConfirmNo = CONFIRM_NO.matcher(t).find();
+        boolean hasRequestSlots = REQUEST_SLOTS.matcher(t).find();
+        boolean hasChangeDoctor = CHANGE_DOCTOR.matcher(t).find();
+        boolean hasProvideDetails = PROVIDE_DETAILS.matcher(t).find();
+
+        if (hasAskDoctorInfo && !hasRequestSlots) {
+            intents.add(ConversationIntent.ASK_DOCTOR_INFO);
         }
-
-        if (ASK_DOCTOR_INFO.matcher(t).find() && !REQUEST_SLOTS.matcher(t).find()) {
-            return ConversationIntent.ASK_DOCTOR_INFO;
+        if (hasConfirmYes && !hasAskDoctorInfo) {
+            intents.add(ConversationIntent.CONFIRM_YES);
+        }
+        if (hasConfirmYes && hasAskDoctorInfo) {
+            intents.add(ConversationIntent.CONFIRM_YES);
+            intents.add(ConversationIntent.ASK_DOCTOR_INFO);
+        }
+        if (hasConfirmNo) {
+            intents.add(ConversationIntent.CONFIRM_NO);
+        }
+        if (hasRequestSlots && !hasAskDoctorInfo) {
+            intents.add(ConversationIntent.REQUEST_SLOTS);
+        }
+        if (hasChangeDoctor) {
+            intents.add(ConversationIntent.CHANGE_DOCTOR);
+        }
+        if (hasProvideDetails && awaitingBookingConfirmation) {
+            intents.add(ConversationIntent.PROVIDE_DETAILS);
         }
 
         if (CHECK_APPOINTMENTS.matcher(t).find()) {
-            return ConversationIntent.CHECK_APPOINTMENTS;
+            intents.clear();
+            intents.add(ConversationIntent.CHECK_APPOINTMENTS);
+            return new IntentResult(intents, false);
         }
-
         if (CANCEL.matcher(t).find() && !RESCHEDULE.matcher(t).find()) {
-            return ConversationIntent.CANCEL_APPOINTMENT;
+            intents.clear();
+            intents.add(ConversationIntent.CANCEL_APPOINTMENT);
+            return new IntentResult(intents, false);
         }
         if (RESCHEDULE.matcher(t).find()) {
-            return ConversationIntent.RESCHEDULE_APPOINTMENT;
+            intents.clear();
+            intents.add(ConversationIntent.RESCHEDULE_APPOINTMENT);
+            return new IntentResult(intents, false);
+        }
+        if (BOOK.matcher(t).find() && !awaitingBookingConfirmation) {
+            intents.add(ConversationIntent.BOOK_APPOINTMENT);
         }
 
-        if (awaitingBookingConfirmation) {
-            if (CONFIRM_NO.matcher(t).find()) return ConversationIntent.CONFIRM_NO;
-            if (CONFIRM_YES.matcher(t).find() && !ASK_DOCTOR_INFO.matcher(t).find()) {
-                return ConversationIntent.CONFIRM_YES;
-            }
+        boolean hasConflict = intents.contains(ConversationIntent.CONFIRM_YES)
+                && (intents.contains(ConversationIntent.ASK_DOCTOR_INFO) || intents.contains(ConversationIntent.CHANGE_DOCTOR));
+
+        if (intents.isEmpty()) {
+            intents.add(ConversationIntent.NONE);
         }
 
-        if (REQUEST_SLOTS.matcher(t).find()) {
-            return ConversationIntent.REQUEST_SLOTS;
-        }
+        return new IntentResult(intents, hasConflict);
+    }
 
-        if (BOOK.matcher(t).find()) {
-            return ConversationIntent.BOOK_APPOINTMENT;
+    /** Legacy single-intent; uses multi-classify. When CONFIRM_YES + ASK_DOCTOR_INFO, returns ASK_DOCTOR_INFO. */
+    public ConversationIntent classify(String userText, boolean awaitingBookingConfirmation) {
+        IntentResult r = classifyMulti(userText, awaitingBookingConfirmation);
+        if (r.getIntents().isEmpty() || r.getIntents().contains(ConversationIntent.NONE)) {
+            return ConversationIntent.NONE;
         }
-
-        return ConversationIntent.NONE;
+        if (r.hasConflict() && r.hasIntent(ConversationIntent.ASK_DOCTOR_INFO)) {
+            return ConversationIntent.ASK_DOCTOR_INFO;
+        }
+        if (r.hasConflict() && r.hasIntent(ConversationIntent.CHANGE_DOCTOR)) {
+            return ConversationIntent.CHANGE_DOCTOR;
+        }
+        return r.getIntents().iterator().next();
     }
 
     public boolean isAskDoctorInfo(String userText) {
-        return classify(userText, false) == ConversationIntent.ASK_DOCTOR_INFO;
+        return classifyMulti(userText, false).hasIntent(ConversationIntent.ASK_DOCTOR_INFO);
     }
 
     public boolean isInterruptRequestingDoctorInfo(String userText, boolean awaitingConfirm) {

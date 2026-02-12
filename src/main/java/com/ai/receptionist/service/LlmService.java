@@ -116,6 +116,7 @@ public class LlmService {
         context.append("- RESCHEDULE: Fetch by caller → confirm existing → new date/time → confirm.\n");
         context.append("- CANCEL: Fetch by caller → confirm → if yes cancel, if no ask \"stop or start over?\".\n");
         context.append("- YES/NO: Always wait for explicit yes/no. Never proceed without confirmation.\n");
+        context.append("- INTERRUPT DURING CONFIRM: If user says something like \"Yes confirm, but before that tell me about Dr X\" — provide the doctor info first (specialization, etc from DB), then ask: \"Would you like me to confirm the appointment now?\" Do NOT book until they say a clean yes.\n");
         context.append("- If user wants to hang up mid-flow: \"Sure, shall I end the call?\"\n");
         context.append("- If user says \"I'll call later\": \"Sure! No worries. We'll be here. Have a good day!\"\n");
         context.append("- If slot unavailable: \"That one's taken. Want to try a different time?\"\n");

@@ -1,6 +1,7 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.conversation.ConversationIntent;
+import com.ai.receptionist.conversation.IntentResult;
 import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Doctor;
 import com.ai.receptionist.conversation.ConversationState;
@@ -33,17 +34,19 @@ public class BookingFlowService {
     private final YesNoClassifier yesNoClassifier;
     private final ResponsePhrases phrases;
     private final IntentClassifier intentClassifier;
+    private final IntentPriorityResolver intentPriorityResolver;
 
     private final Map<String, PendingState> pendingByCall = new ConcurrentHashMap<>();
 
     public BookingFlowService(AppointmentService appointmentService, RestTemplateBuilder builder,
                               YesNoClassifier yesNoClassifier, ResponsePhrases phrases,
-                              IntentClassifier intentClassifier) {
+                              IntentClassifier intentClassifier, IntentPriorityResolver intentPriorityResolver) {
         this.appointmentService = appointmentService;
         this.restTemplate = builder.build();
         this.yesNoClassifier = yesNoClassifier;
         this.phrases = phrases;
         this.intentClassifier = intentClassifier;
+        this.intentPriorityResolver = intentPriorityResolver;
     }
 
     public static class PendingState {
@@ -68,6 +71,8 @@ public class BookingFlowService {
         public ConversationState currentState = ConversationState.START;
         /** Locked after booking completes; prevents duplicate confirmation. */
         public boolean bookingLocked;
+        /** Same as bookingLocked; idempotent booking guard. */
+        public boolean bookingCompleted;
 
         public boolean hasAnyPending() {
             return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
@@ -87,12 +92,17 @@ public class BookingFlowService {
         String normalized = userText.toLowerCase().trim();
         PendingState state = pendingByCall.get(callSid);
 
-        // Confirm booking - with interrupt guard
-        if (state != null && state.pendingConfirmBook && !state.bookingLocked) {
-            if (intentClassifier.isInterruptRequestingDoctorInfo(userText, true)) {
+        // Strict confirmation gate: multi-intent resolution
+        if (state != null && state.pendingConfirmBook && !state.bookingLocked && !state.bookingCompleted) {
+            IntentResult intentResult = intentClassifier.classifyMulti(userText, true);
+            if (intentPriorityResolver.shouldDeferConfirmationForDoctorInfo(intentResult)) {
+                log.info("CONFIRM deferred: ASK_DOCTOR_INFO/CHANGE_DOCTOR overrides CONFIRM_YES | intents={}", intentResult.getIntents());
                 return Optional.empty();
             }
-            if (intentClassifier.classify(userText, true) == ConversationIntent.CONFIRM_YES) {
+            if (!intentPriorityResolver.isBookingAllowed(intentResult)) {
+                return Optional.empty();
+            }
+            if (intentResult.isSingleIntent(ConversationIntent.CONFIRM_YES)) {
                 return confirmBook(callSid, fromNumber, state);
             }
         }
@@ -470,13 +480,13 @@ public class BookingFlowService {
         String twilioPhone = StringUtils.isNotBlank(fromNumber) ? fromNumber : state.patientPhone;
         Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName, state.patientPhone,
                 state.doctorKey, state.date, state.time);
-        state.bookingLocked = true;
         if (result.isPresent()) {
+            state.bookingLocked = true;
+            state.bookingCompleted = true;
             log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey, state.date, state.time);
             clearPending(callSid);
             return Optional.of(phrases.bookingConfirmed());
         }
-        state.bookingLocked = false;
         return Optional.of(phrases.slotUnavailable());
     }
 
