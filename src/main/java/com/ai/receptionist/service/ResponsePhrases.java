@@ -61,6 +61,10 @@ public class ResponsePhrases {
         return "No problem, no changes made. Do you want to try something else, or should I end the call?";
     }
 
+    public String abortBooking() {
+        return "No problem, I've stopped the booking. Is there anything else I can help with?";
+    }
+
     public String startOver() {
         return "Sure thing! What can I help you with?";
     }
@@ -83,5 +87,13 @@ public class ResponsePhrases {
 
     public String sorryFixIt() {
         return "I'm really sorry about that. Let's fix it.";
+    }
+
+    public String couldYouRepeat() {
+        return "Sorry, I didn't catch that. Could you repeat?";
+    }
+
+    public String unclearAskAgain() {
+        return "I'm sorry, the line was a bit unclear. Could you say that again?";
     }
 }

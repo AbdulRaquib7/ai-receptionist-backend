@@ -102,6 +102,13 @@ public class BookingFlowService {
             return buildListDoctorsResponse();
         }
 
+        // Abort booking: user says "don't need appointment", "cut appointment", "cancel" mid-flow (only when in booking flow)
+        if (isAbortBookingRequest(normalized) && state != null
+                && (state.pendingNeedNamePhone || state.pendingConfirmBook || StringUtils.isNotBlank(state.doctorKey))) {
+            clearPending(callSid);
+            return Optional.of(phrases.abortBooking());
+        }
+
         // Post-booking: user says "already booked" / "appointment confirmed" / "we have booked"
         if (isAlreadyBookedAcknowledgment(normalized)) {
             List<AppointmentService.AppointmentSummary> appts = appointmentService.getActiveAppointmentSummaries(fromNumber);
@@ -456,6 +463,9 @@ public class BookingFlowService {
             } else {
                 s.pendingNeedNamePhone = true;
                 s.pendingConfirmBook = false;
+                if (intentClassifier.classifyMulti(userText, false).hasIntent(ConversationIntent.ASK_DOCTOR_INFO)) {
+                    return buildDoctorInfoThenNeedNamePhone(s, doctorKey);
+                }
                 return Optional.of(phrases.needNameAndPhone());
             }
         }
@@ -493,6 +503,9 @@ public class BookingFlowService {
                         if (s.pendingConfirmBook) {
                             return Optional.of("Your appointment with " + docName + " on " + s.date + " at " + matchedTime + ". Say yes to confirm.");
                         } else {
+                            if (intentClassifier.classifyMulti(userText, false).hasIntent(ConversationIntent.ASK_DOCTOR_INFO)) {
+                                return buildDoctorInfoThenNeedNamePhone(s, s.doctorKey);
+                            }
                             return Optional.of(phrases.needNameAndPhone());
                         }
                     }
@@ -551,6 +564,23 @@ public class BookingFlowService {
         return Optional.of(phrases.slotUnavailable());
     }
 
+    /** When user picks slot AND asks doctor info, give info then ask for name/phone. */
+    private Optional<String> buildDoctorInfoThenNeedNamePhone(PendingState state, String doctorKey) {
+        if (StringUtils.isBlank(doctorKey)) return Optional.of(phrases.needNameAndPhone());
+        List<Doctor> doctors = appointmentService.getAllDoctors();
+        Doctor doc = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().orElse(null);
+        if (doc == null) return Optional.of(phrases.needNameAndPhone());
+        StringBuilder sb = new StringBuilder();
+        sb.append(doc.getName()).append(" is our ");
+        if (StringUtils.isNotBlank(doc.getSpecialization())) {
+            sb.append(doc.getSpecialization().toLowerCase()).append(". ");
+        } else {
+            sb.append("doctor. ");
+        }
+        sb.append("Now, ").append(phrases.needNameAndPhone().toLowerCase());
+        return Optional.of(sb.toString());
+    }
+
     /** When user asks doctor info during confirmation, return DB-backed doctor details and re-prompt for confirm. */
     private Optional<String> buildDoctorInfoThenConfirmPrompt(PendingState state) {
         if (StringUtils.isBlank(state.doctorKey)) return Optional.empty();
@@ -602,17 +632,20 @@ public class BookingFlowService {
         return null;
     }
 
-    /** Map user input (name, key, specialization) to actual DB doctor key. All matching from DB only; intent extractor handles variants (e.g. Allen/Alan). */
+    /** Map user input (name, key, specialization) to actual DB doctor key. Handles variants: Allen->Alan, Ahmad/Ahamad->Ahmed. */
     private String normalizeDoctorKey(String userInput) {
         if (userInput == null || userInput.isBlank()) return null;
-        String k = userInput.trim().toLowerCase().replace(".", "");
+        String k = userInput.trim().toLowerCase().replace(".", "").replaceAll("\\s+", "");
         List<Doctor> doctors = appointmentService.getAllDoctors();
         for (Doctor d : doctors) {
-            if (d.getKey() != null && d.getKey().toLowerCase().equals(k)) return d.getKey();
-            if (d.getName() != null && (d.getName().toLowerCase().equals(k) || d.getName().toLowerCase().contains(k))) return d.getKey();
+            if (d.getKey() != null && d.getKey().toLowerCase().replace("-", "").equals(k)) return d.getKey();
+            String nameNorm = d.getName() != null ? d.getName().toLowerCase().replace(".", "").replaceAll("\\s+", "") : "";
+            if (!nameNorm.isEmpty() && (nameNorm.equals(k) || nameNorm.contains(k) || k.contains(nameNorm.replace("dr", "")))) return d.getKey();
             if (d.getSpecialization() != null && !d.getSpecialization().isBlank()
                     && d.getSpecialization().toLowerCase().contains(k)) return d.getKey();
         }
+        if (k.contains("allen") || k.equals("alan")) return doctors.stream().filter(d -> "dr-alan".equals(d.getKey())).findFirst().map(Doctor::getKey).orElse(null);
+        if (k.contains("ahmad") || k.contains("ahamed") || k.contains("ahamad")) return doctors.stream().filter(d -> "dr-ahmed".equals(d.getKey())).findFirst().map(Doctor::getKey).orElse(null);
         return null;
     }
 
@@ -637,6 +670,15 @@ public class BookingFlowService {
         }
         sb.append(". Which one would you like to book with?");
         return Optional.of(sb.toString());
+    }
+
+    private boolean isAbortBookingRequest(String normalized) {
+        String n = normalized.replace("'", "");  // handle "dont" from speech transcription
+        return (n.contains("dont need") || n.contains("don't need")) && (n.contains("appointment") || n.contains("booking"))
+                || normalized.contains("cut the appointment") || normalized.contains("cut appointment")
+                || normalized.contains("cancel the appointment") || (normalized.contains("cancel") && normalized.contains("appointment"))
+                || normalized.contains("no appointment") || normalized.contains("never mind")
+                || (normalized.contains("stop") && (normalized.contains("booking") || normalized.contains("appointment")));
     }
 
     private boolean isAlreadyBookedAcknowledgment(String normalized) {
