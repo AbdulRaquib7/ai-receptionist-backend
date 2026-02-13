@@ -92,6 +92,25 @@ public class BookingFlowService {
         String normalized = userText.toLowerCase().trim();
         PendingState state = pendingByCall.get(callSid);
 
+        // Early: user says goodbye -> end politely (prevents wrong "slots" or "name/phone" response)
+        if (wantsToEndCall(normalized)) {
+            return Optional.of(phrases.goodbye());
+        }
+
+        // Early: list doctors (before ask_availability which asks "which doctor")
+        if (isListDoctorsRequest(normalized)) {
+            return buildListDoctorsResponse();
+        }
+
+        // Post-booking: user says "already booked" / "appointment confirmed" / "we have booked"
+        if (isAlreadyBookedAcknowledgment(normalized)) {
+            List<AppointmentService.AppointmentSummary> appts = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            if (!appts.isEmpty()) {
+                AppointmentService.AppointmentSummary a = appts.get(0);
+                return Optional.of("Yes, you're all set. Your appointment with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + " is confirmed. Anything else I can help with?");
+            }
+        }
+
         // Strict confirmation gate: multi-intent resolution
         if (state != null && state.pendingConfirmBook && !state.bookingLocked && !state.bookingCompleted) {
             IntentResult intentResult = intentClassifier.classifyMulti(userText, true);
@@ -208,6 +227,10 @@ public class BookingFlowService {
             if (StringUtils.isBlank(extracted.patientPhone)) extracted.patientPhone = userText.replaceAll("\\D", "");
         }
 
+        if (extracted.intent.equals("list_doctors") || isListDoctorsRequest(normalized)) {
+            return buildListDoctorsResponse();
+        }
+
         if (extracted.intent.equals("check_appointments")) {
             List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
             if (list.isEmpty()) return Optional.of("You don't have any appointments right now.");
@@ -237,8 +260,12 @@ public class BookingFlowService {
                                 .map(Doctor::getKey))
                         .orElse(null);
             }
-            if (doctorKey == null && extracted.doctorKey != null) {
-                doctorKey = normalizeDoctorKey(extracted.doctorKey);
+            if (doctorKey == null && StringUtils.isNotBlank(extracted.doctorKey)) {
+                String nk = normalizeDoctorKey(extracted.doctorKey);
+                if (nk == null) {
+                    return Optional.of(buildUnknownDoctorResponse(extracted.doctorKey));
+                }
+                doctorKey = nk;
             }
             if (doctorKey == null && s != null && StringUtils.isNotBlank(s.doctorKey)) {
                 doctorKey = s.doctorKey;
@@ -589,6 +616,41 @@ public class BookingFlowService {
         return null;
     }
 
+    private boolean isListDoctorsRequest(String normalized) {
+        return normalized.contains("list") && (normalized.contains("doctor") || normalized.contains("doc"))
+                || normalized.contains("what doctors") || normalized.contains("doctor names")
+                || normalized.contains("restore") && normalized.contains("doctor")
+                || normalized.contains("available doctors");
+    }
+
+    private Optional<String> buildListDoctorsResponse() {
+        List<Doctor> doctors = appointmentService.getAllDoctors();
+        if (doctors.isEmpty()) return Optional.of("We don't have any doctors available at the moment.");
+        StringBuilder sb = new StringBuilder("We've got ");
+        for (int i = 0; i < doctors.size(); i++) {
+            Doctor d = doctors.get(i);
+            if (i > 0) sb.append(i == doctors.size() - 1 ? " and " : ", ");
+            sb.append(d.getName());
+            if (d.getSpecialization() != null && !d.getSpecialization().isBlank()) {
+                sb.append(" (").append(d.getSpecialization()).append(")");
+            }
+        }
+        sb.append(". Which one would you like to book with?");
+        return Optional.of(sb.toString());
+    }
+
+    private boolean isAlreadyBookedAcknowledgment(String normalized) {
+        return normalized.contains("already booked") || normalized.contains("have already booked")
+                || normalized.contains("we booked") || normalized.contains("appointment confirmed")
+                || normalized.contains("appointment is confirmed") || normalized.contains("we have booked");
+    }
+
+    private String buildUnknownDoctorResponse(String rawDoctorName) {
+        List<Doctor> doctors = appointmentService.getAllDoctors();
+        String names = doctors.stream().map(Doctor::getName).filter(Objects::nonNull).reduce((a, b) -> a + ", " + b).orElse("");
+        return "We don't have " + (rawDoctorName != null ? rawDoctorName.trim() : "that doctor") + ". We have " + names + ". Which would you like?";
+    }
+
     private String buildDoctorNotFoundMessage() {
         List<Doctor> doctors = appointmentService.getAllDoctors();
         if (doctors.isEmpty()) return "We don't have any doctors available at the moment.";
@@ -688,10 +750,11 @@ public class BookingFlowService {
 
         String todayIso = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         String prompt = "Extract from conversation. Output JSON only. Today is " + todayIso + ".\n" +
-                "intent: book|cancel|reschedule|check_appointments|ask_availability|none\n" +
-                "check_appointments: 'do I have an appointment', 'what are my appointments', 'any appointment for my number'.\n" +
-                "ask_availability: 'what dates/times available', 'available slots', 'list doctors and slots'.\n" +
-                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). For ask_availability, if AI just recommended a doctor (e.g. 'Dr John... would you like me to check slots?') and user says 'yes/sure/check slots', extract that doctor's key from the AI message. Output the matching key or empty if unclear.\n" +
+                "intent: book|cancel|reschedule|check_appointments|ask_availability|list_doctors|none\n" +
+                "check_appointments: 'do I have an appointment', 'appointment confirmed', 'is appointment confirmed', 'what are my appointments'.\n" +
+                "ask_availability: 'what dates/times available', 'available slots' — NOT when user asks to list doctors.\n" +
+                "list_doctors: 'list doctor names', 'what doctors are available', 'doctor names', 'list doctors', 'what doctors do you have'.\n" +
+                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). If user names a doctor NOT in our list (e.g. Dr Charles), output that name as doctorKey so we can inform them. For ask_availability, if AI just recommended a doctor and user says 'yes/sure/check slots', extract that doctor's key from the AI message.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given. For cancel/reschedule with multiple appointments, extract the name (e.g. 'cancel Selva's' -> patientName=Selva).\n" +

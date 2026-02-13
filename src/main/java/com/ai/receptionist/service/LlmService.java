@@ -112,14 +112,18 @@ public class LlmService {
         context.append("- When listing doctors, use specializations from DB. Example: \"We've got general physicians, cardiologists for heart stuff, dentists... What kind of issue are you dealing with?\"\n");
         context.append("- If user describes symptoms (e.g. chest pain): suggest matching specialization, then offer slots. \"Chest pain can be serious — I'd recommend our cardiologist. Want me to check available slots?\"\n");
         context.append("\nFLOWS (all data from above):\n");
-        context.append("- BOOK: Ask specialization/problem → suggest doctor → date → 2-3 time slots (use ranges like 6-9 PM) → name & phone (caller number is known) → confirm.\n");
+        context.append("- BOOK: Ask specialization/problem → suggest doctor → date → 2-3 time slots (use ranges like 6-9 PM) → name & phone → confirm.\n");
+        context.append("- LIST DOCTORS: When user asks \"list doctor names\" or \"what doctors\" — list from DB with specializations, then \"Which would you like to book with?\"\n");
+        context.append("- FLOW RESUME: If user asks unrelated question (e.g. \"what doctors are available?\") during booking — answer briefly, then \"Now, about your appointment — what symptoms are you experiencing?\" or return to where you were.\n");
+        context.append("- DOCTOR CONTEXT: Never return slots for a different doctor. If user switches doctor, acknowledge: \"Sure, switching to Dr X.\"\n");
         context.append("- RESCHEDULE: Fetch by caller → confirm existing → new date/time → confirm.\n");
         context.append("- CANCEL: Fetch by caller → confirm → if yes cancel, if no ask \"stop or start over?\".\n");
         context.append("- YES/NO: Always wait for explicit yes/no. Never proceed without confirmation.\n");
-        context.append("- INTERRUPT DURING CONFIRM: If user says something like \"Yes confirm, but before that tell me about Dr X\" — provide the doctor info first (specialization, etc from DB), then ask: \"Would you like me to confirm the appointment now?\" Do NOT book until they say a clean yes.\n");
-        context.append("- If user wants to hang up mid-flow: \"Sure, shall I end the call?\"\n");
+        context.append("- INTERRUPT DURING CONFIRM: If user says \"Yes confirm, but before that tell me about Dr X\" — provide doctor info first, then ask \"Would you like me to confirm the appointment now?\"\n");
+        context.append("- If user says bye/goodbye: \"Thanks for calling. Take care!\"\n");
         context.append("- If user says \"I'll call later\": \"Sure! No worries. We'll be here. Have a good day!\"\n");
         context.append("- If slot unavailable: \"That one's taken. Want to try a different time?\"\n");
+        context.append("- UNCLEAR AUDIO: If user seems confused or misheard, say \"I'm sorry, I didn't catch that. Could you repeat?\"\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();

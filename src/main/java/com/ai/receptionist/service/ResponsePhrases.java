@@ -77,6 +77,10 @@ public class ResponsePhrases {
         return "Hey, are you still there?";
     }
 
+    public String stillHere() {
+        return "I'm still here. Please go ahead.";
+    }
+
     public String sorryFixIt() {
         return "I'm really sorry about that. Let's fix it.";
     }
