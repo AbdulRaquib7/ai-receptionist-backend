@@ -2,7 +2,6 @@ package com.ai.receptionist.service;
 
 import com.ai.receptionist.conversation.ConversationIntent;
 import com.ai.receptionist.conversation.IntentResult;
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
 import java.util.EnumSet;
@@ -17,7 +16,13 @@ import java.util.regex.Pattern;
 public class IntentClassifier {
 
     private static final Pattern ASK_DOCTOR_INFO = Pattern.compile(
-            "\\b(tell me about|tell about|about (dr\\.?|doctor)|what('s| is) (dr\\.?|doctor)|know about|before that|before (i |we )?confirm|describe|info about|can you tell about)\\b",
+            "\\b(tell me about|tell about|explain about|explain|about (dr\\.?|doctor)|what('s| is) (dr\\.?|doctor)|know about|how (he|she|they) (was|is)|whole experience|before that|before (i |we )?confirm|describe|info about|can you (tell|explain) about)\\b",
+            Pattern.CASE_INSENSITIVE
+    );
+
+    /** Excludes CONFIRM_YES when user means "verify/explain doctor" or "before I book", not "confirm the booking". */
+    private static final Pattern CONFIRM_YES_EXCLUDE = Pattern.compile(
+            "\\b(confirm the doctor|confirm who|confirm (which|what) doctor|before (i |we )?book|before booking)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
@@ -76,7 +81,8 @@ public class IntentClassifier {
         Set<ConversationIntent> intents = EnumSet.noneOf(ConversationIntent.class);
 
         boolean hasAskDoctorInfo = ASK_DOCTOR_INFO.matcher(t).find();
-        boolean hasConfirmYes = CONFIRM_YES.matcher(t).find();
+        boolean confirmYesExcluded = CONFIRM_YES_EXCLUDE.matcher(t).find();
+        boolean hasConfirmYes = !confirmYesExcluded && CONFIRM_YES.matcher(t).find();
         boolean hasConfirmNo = CONFIRM_NO.matcher(t).find();
         boolean hasRequestSlots = REQUEST_SLOTS.matcher(t).find();
         boolean hasChangeDoctor = CHANGE_DOCTOR.matcher(t).find();

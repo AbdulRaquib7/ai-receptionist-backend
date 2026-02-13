@@ -157,36 +157,40 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Returns true if the exchange indicates the conversation is over.
-     * When hasPending is true (e.g. waiting for user to say name or confirm), only end on explicit
-     * AI confirmation to avoid false hangups from STT mishearing (e.g. "Arun" -> "thank you bye").
+     * Returns true only when conversation is truly finished. Do NOT end when AI asks a question.
+     * Safe rules: end only when user explicitly declines more help or says goodbye.
      */
     private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
 
-        // AI said explicit confirmation/closing
-        if (ai.contains("has been cancelled") || ai.contains("has been rescheduled")
-                || ai.contains("cancelled") || ai.contains("you're all set") || ai.contains("all set")
-                || ai.contains("take care") || ai.contains("have a good day")) {
+        // NEVER end when AI ends with a question - wait for user response
+        if (ai.contains("anything else i can help") || ai.contains("anything else") && ai.contains("help")
+                || ai.contains("can i help you with") || ai.contains("help you with anything")
+                || ai.contains("what can i help") || ai.contains("would you like me to confirm")) {
+            return false;
+        }
+
+        // User declined more help: short "no" when AI is about to say goodbye
+        if ((user.equals("no") || user.equals("nope") || user.equals("nah")) && !hasPending) {
+            if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care") || ai.contains("bye")) {
+                return true;
+            }
+        }
+
+        // User said goodbye / end call
+        if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")
+                || (user.contains("thank you") && (user.contains("bye") || user.contains("that's all")))) {
             return true;
         }
 
-        // AI said generic goodbye - only end if we're NOT in a flow (avoid ending when STT misheard)
-        if (!hasPending && (ai.contains("goodbye") || ai.contains("have a great day") || ai.contains("feel free to call"))) {
+        // AI said explicit final goodbye (after user declined)
+        if (ai.contains("have a good day") || ai.contains("have a great day") || ai.contains("take care")
+                || ai.contains("feel free to call") || ai.contains("thank you for calling")) {
             return true;
         }
 
-        // User-triggered: require longer phrase to avoid noise; when pending, be extra strict
-        if (hasPending) return false;
-        if (user.length() < 10) return false;
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")) {
-            return true;
-        }
-        if (user.contains("thank you") && (user.contains("goodbye") || user.contains("bye bye") || user.contains("that's all"))) {
-            return true;
-        }
         return false;
     }
 

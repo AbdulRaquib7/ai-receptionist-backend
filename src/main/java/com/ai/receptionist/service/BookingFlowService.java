@@ -97,7 +97,7 @@ public class BookingFlowService {
             IntentResult intentResult = intentClassifier.classifyMulti(userText, true);
             if (intentPriorityResolver.shouldDeferConfirmationForDoctorInfo(intentResult)) {
                 log.info("CONFIRM deferred: ASK_DOCTOR_INFO/CHANGE_DOCTOR overrides CONFIRM_YES | intents={}", intentResult.getIntents());
-                return Optional.empty();
+                return buildDoctorInfoThenConfirmPrompt(state);
             }
             if (!intentPriorityResolver.isBookingAllowed(intentResult)) {
                 return Optional.empty();
@@ -173,6 +173,17 @@ public class BookingFlowService {
             state.pendingConfirmAbort = true;
             state.currentState = ConversationState.CONFIRM_ABORT;
             return Optional.of(phrases.noChangesAbortChoice());
+        }
+
+        // Post-booking: user says "no" to "Can I help you with anything else?" -> polite goodbye
+        if ((state == null || !state.hasAnyPending()) && (normalized.equals("no") || normalized.equals("nope"))) {
+            if (conversationSummary != null && !conversationSummary.isEmpty()) {
+                String lastMsg = conversationSummary.get(conversationSummary.size() - 1);
+                String lastLower = lastMsg.toLowerCase();
+                if (lastLower.contains("assistant:") && (lastLower.contains("anything else") || lastLower.contains("help you with"))) {
+                    return Optional.of(phrases.goodbye());
+                }
+            }
         }
 
         // CONFIRM_ABORT: user chose stop (end call) or start over
@@ -511,6 +522,23 @@ public class BookingFlowService {
             return Optional.of(phrases.rescheduleConfirmed());
         }
         return Optional.of(phrases.slotUnavailable());
+    }
+
+    /** When user asks doctor info during confirmation, return DB-backed doctor details and re-prompt for confirm. */
+    private Optional<String> buildDoctorInfoThenConfirmPrompt(PendingState state) {
+        if (StringUtils.isBlank(state.doctorKey)) return Optional.empty();
+        List<Doctor> doctors = appointmentService.getAllDoctors();
+        Doctor doc = doctors.stream().filter(d -> state.doctorKey.equals(d.getKey())).findFirst().orElse(null);
+        if (doc == null) return Optional.empty();
+        StringBuilder sb = new StringBuilder();
+        sb.append(doc.getName()).append(" is our ");
+        if (StringUtils.isNotBlank(doc.getSpecialization())) {
+            sb.append(doc.getSpecialization().toLowerCase()).append(". ");
+        } else {
+            sb.append("doctor. ");
+        }
+        sb.append(phrases.confirmAfterDoctorInfo());
+        return Optional.of(sb.toString());
     }
 
     private boolean wantsToEndCall(String normalized) {

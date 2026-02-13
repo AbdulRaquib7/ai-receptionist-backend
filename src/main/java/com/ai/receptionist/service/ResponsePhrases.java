@@ -22,7 +22,7 @@ public class ResponsePhrases {
     }
 
     public String bookingConfirmed() {
-        return "Awesome! You're all set. You'll get a reminder too. Anything else I can help with?";
+        return "Awesome! You're all set. You'll get a reminder too. Can I help you with anything else?";
     }
 
     public String slotUnavailable() {
