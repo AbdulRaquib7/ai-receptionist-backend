@@ -92,4 +92,8 @@ public class ResponsePhrases {
     public String unclearAskAgain() {
         return "I'm sorry, the line was a bit unclear. Could you say that again?";
     }
+
+    public String clarifyWhatHappened() {
+        return "I can check your appointments or help you book or cancel. Say 'my appointments' to hear your nearest one, or tell me what you'd like to do.";
+    }
 }

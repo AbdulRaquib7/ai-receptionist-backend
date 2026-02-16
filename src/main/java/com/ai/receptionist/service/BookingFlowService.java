@@ -80,6 +80,10 @@ public class BookingFlowService {
         }
 
         if (state != null && state.pendingConfirmBook && !state.bookingLocked && !state.bookingCompleted) {
+            if (hasCancelOrAbortInSameTurn(normalized)) {
+                clearPending(callSid);
+                return Optional.of(phrases.abortBooking());
+            }
             IntentResult intentResult = intentClassifier.classifyMulti(userText, true);
             if (intentPriorityResolver.shouldDeferConfirmationForDoctorInfo(intentResult)) {
                 log.info("CONFIRM deferred: ASK_DOCTOR_INFO/CHANGE_DOCTOR overrides CONFIRM_YES | intents={}", intentResult.getIntents());
@@ -188,20 +192,20 @@ public class BookingFlowService {
             return buildListDoctorsResponse();
         }
 
+        if (isClarifyWhatHappenedRequest(normalized) && (state == null || !state.pendingChooseCancelAppointment)) {
+            return Optional.of(phrases.clarifyWhatHappened());
+        }
+
         if (extracted.intent.equals("check_appointments")) {
             List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
             if (list.isEmpty()) return Optional.of("You don't have any appointments right now.");
+            List<AppointmentService.AppointmentSummary> sorted = sortAppointmentsByNearest(list);
             if (list.size() == 1) {
-                AppointmentService.AppointmentSummary a = list.get(0);
+                AppointmentService.AppointmentSummary a = sorted.get(0);
                 return Optional.of("Yeah, you've got one — " + a.patientName + " with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ".");
             }
-            StringBuilder sb = new StringBuilder("You've got " + list.size() + ": ");
-            for (int i = 0; i < list.size(); i++) {
-                AppointmentService.AppointmentSummary a = list.get(i);
-                if (i > 0) sb.append("; ");
-                sb.append(a.patientName).append(" with ").append(a.doctorName).append(" on ").append(a.slotDate).append(" at ").append(a.startTime);
-            }
-            return Optional.of(sb.append(".").toString());
+            AppointmentService.AppointmentSummary nearest = sorted.get(0);
+            return Optional.of("You have " + list.size() + " appointments. Your nearest is " + nearest.patientName + " with " + nearest.doctorName + " on " + nearest.slotDate + " at " + nearest.startTime + ". Want me to list all or help with something specific?");
         }
 
         if (extracted.intent.equals("ask_availability") && intentClassifier.classify(userText, false) != ConversationIntent.ASK_DOCTOR_INFO) {
@@ -236,11 +240,11 @@ public class BookingFlowService {
             final String resolvedDoctorKey = doctorKey;
             PendingStateDto stateForBook = getOrCreate(callSid);
             stateForBook.doctorKey = resolvedDoctorKey;
-            List<String> samples = new ArrayList<>();
-            slots.get(resolvedDoctorKey).forEach((date, times) -> {
-                if (samples.size() < 3 && times != null && !times.isEmpty())
-                    samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
-            });
+            List<String> requestedDates = getRequestedDatesFromUserMessage(normalized);
+            List<String> samples = buildSlotSamplesForDoctor(slots.get(resolvedDoctorKey), requestedDates);
+            if (samples.isEmpty()) {
+                return Optional.of("No slots for that doctor on those dates. Want to try another date or doctor?");
+            }
             List<Doctor> doctors = appointmentService.getAllDoctors();
             String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
             return Optional.of("Slots for " + docName + " — " + String.join("; ", samples) + ". Pick a time that works.");
@@ -517,15 +521,8 @@ public class BookingFlowService {
         List<Doctor> doctors = appointmentService.getAllDoctors();
         Doctor doc = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().orElse(null);
         if (doc == null) return Optional.of(phrases.needNameAndPhone());
-        StringBuilder sb = new StringBuilder();
-        sb.append(doc.getName()).append(" is our ");
-        if (StringUtils.isNotBlank(doc.getSpecialization())) {
-            sb.append(doc.getSpecialization().toLowerCase()).append(". ");
-        } else {
-            sb.append("doctor. ");
-        }
-        sb.append("Now, ").append(phrases.needNameAndPhone().toLowerCase());
-        return Optional.of(sb.toString());
+        String spec = doctorSpecializationPhrase(doc);
+        return Optional.of(doc.getName() + " is our " + spec + " Now, " + phrases.needNameAndPhone().toLowerCase());
     }
 
     private Optional<String> buildDoctorInfoThenConfirmPrompt(PendingStateDto state) {
@@ -533,15 +530,15 @@ public class BookingFlowService {
         List<Doctor> doctors = appointmentService.getAllDoctors();
         Doctor doc = doctors.stream().filter(d -> state.doctorKey.equals(d.getKey())).findFirst().orElse(null);
         if (doc == null) return Optional.empty();
-        StringBuilder sb = new StringBuilder();
-        sb.append(doc.getName()).append(" is our ");
-        if (StringUtils.isNotBlank(doc.getSpecialization())) {
-            sb.append(doc.getSpecialization().toLowerCase()).append(". ");
-        } else {
-            sb.append("doctor. ");
+        String spec = doctorSpecializationPhrase(doc);
+        return Optional.of(doc.getName() + " is our " + spec + " " + phrases.confirmAfterDoctorInfo());
+    }
+
+    private String doctorSpecializationPhrase(Doctor doc) {
+        if (doc.getSpecialization() != null && !doc.getSpecialization().isBlank()) {
+            return doc.getSpecialization().trim().toLowerCase() + ". ";
         }
-        sb.append(phrases.confirmAfterDoctorInfo());
-        return Optional.of(sb.toString());
+        return "general physician. ";
     }
 
     private boolean wantsToEndCall(String normalized) {
@@ -624,6 +621,58 @@ public class BookingFlowService {
                 || normalized.contains("cancel the appointment") || (normalized.contains("cancel") && normalized.contains("appointment"))
                 || normalized.contains("no appointment") || normalized.contains("never mind")
                 || (normalized.contains("stop") && (normalized.contains("booking") || normalized.contains("appointment")));
+    }
+
+    private boolean hasCancelOrAbortInSameTurn(String normalized) {
+        return normalized.contains("cancel that") || normalized.contains("no, no. cancel") || normalized.contains("no no cancel")
+                || (normalized.contains("cancel") && normalized.contains("no"));
+    }
+
+    private boolean isClarifyWhatHappenedRequest(String normalized) {
+        return normalized.contains("what you've done") || normalized.contains("what you did") || normalized.contains("clear what")
+                || normalized.contains("did you cancel") || normalized.contains("did you book") || normalized.contains("cancelled or booked");
+    }
+
+    private static final int MAX_SLOT_SAMPLES = 5;
+
+    private List<String> getRequestedDatesFromUserMessage(String normalized) {
+        List<String> out = new ArrayList<>();
+        String tomorrow = LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE);
+        String dayAfter = LocalDate.now().plusDays(2).format(DateTimeFormatter.ISO_LOCAL_DATE);
+        boolean wantOtherDates = normalized.contains("other dates") || normalized.contains("any other dates") || normalized.contains("other date");
+        if (normalized.contains("tomorrow") || wantOtherDates) out.add(tomorrow);
+        if (normalized.contains("day after") || normalized.contains("day after tomorrow") || wantOtherDates) out.add(dayAfter);
+        return out;
+    }
+
+    private List<String> buildSlotSamplesForDoctor(Map<String, List<String>> byDate, List<String> requestedDates) {
+        if (byDate == null || byDate.isEmpty()) return Collections.emptyList();
+        List<String> samples = new ArrayList<>();
+        List<String> dateOrder = new ArrayList<>(byDate.keySet());
+        Collections.sort(dateOrder);
+        if (!requestedDates.isEmpty()) {
+            for (String d : requestedDates) {
+                List<String> times = byDate.get(d);
+                if (times != null && !times.isEmpty())
+                    samples.add(d + ": " + LlmService.formatSlotsAsRanges(times));
+            }
+        }
+        for (String date : dateOrder) {
+            if (samples.size() >= MAX_SLOT_SAMPLES) break;
+            if (requestedDates.contains(date)) continue;
+            List<String> times = byDate.get(date);
+            if (times != null && !times.isEmpty())
+                samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
+        }
+        return samples;
+    }
+
+    private List<AppointmentService.AppointmentSummary> sortAppointmentsByNearest(List<AppointmentService.AppointmentSummary> list) {
+        List<AppointmentService.AppointmentSummary> copy = new ArrayList<>(list);
+        copy.sort(Comparator
+                .comparing((AppointmentService.AppointmentSummary a) -> a.slotDate)
+                .thenComparing(a -> a.startTime != null ? a.startTime : ""));
+        return copy;
     }
 
     private boolean isAlreadyBookedAcknowledgment(String normalized) {
