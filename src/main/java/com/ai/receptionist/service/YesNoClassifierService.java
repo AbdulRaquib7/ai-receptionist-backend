@@ -7,12 +7,8 @@ import org.springframework.stereotype.Service;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-/**
- * Classifies user utterances into YES, NO, or UNKNOWN.
- * Handles all common variations to ensure confirmations are never missed.
- */
 @Service
-public class YesNoClassifier {
+public class YesNoClassifierService {
 
     private static final Set<String> AFFIRMATIVE_EXACT = Set.of(
             "yes", "yeah", "yep", "ya", "yup", "uh huh", "uh-huh", "ok", "okay",
@@ -34,9 +30,6 @@ public class YesNoClassifier {
             Pattern.CASE_INSENSITIVE
     );
 
-    /**
-     * Classify user input. "wait" and "not now" are treated as NO (do not proceed).
-     */
     public YesNoResult classify(String userInput) {
         if (userInput == null || userInput.isBlank()) {
             return YesNoResult.UNKNOWN;

@@ -41,18 +41,10 @@ public class TwilioService {
         this.restTemplate = builder.build();
     }
 
-    /**
-     * Updates the active call so Twilio fetches TwiML that speaks the AI response
-     * then redirects to /continue-call or /goodbye (hang up) if endCall is true.
-     */
     public void speakResponse(String callSid, String aiText) {
         speakResponse(callSid, aiText, false);
     }
-
-    /**
-     * Same as speakResponse(callSid, aiText). When endCall is true, redirect URL returns
-     * TwiML with &lt;Hangup/&gt; — call ends via TwiML only. Never use REST DELETE on active calls (causes 409).
-     */
+    
     public void speakResponse(String callSid, String aiText, boolean endCall) {
         if (callSid == null || aiText == null || aiText.isEmpty()) {
             return;
@@ -81,13 +73,8 @@ public class TwilioService {
             log.error("Twilio Call Update failed for call {}", callSid, e);
         }
 
-        // When endCall=true, redirect URL returns TwiML with <Hangup/>. Do NOT call REST DELETE -
-        // it causes 409 "Call cannot be deleted because it is still in progress" while TwiML is executing.
     }
 
-    /**
-     * REST DELETE on call. DO NOT use while call is in progress — causes 409. Rely on TwiML &lt;Hangup/&gt; instead.
-     */
     public void hangupCall(String callSid) {
         if (callSid == null || accountSid == null || accountSid.isEmpty() || authToken == null || authToken.isEmpty()) {
             return;

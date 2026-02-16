@@ -1,9 +1,9 @@
 package com.ai.receptionist.websocket;
 
+import com.ai.receptionist.component.ConversationStore;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.service.BookingFlowService;
-import com.ai.receptionist.service.ConversationStore;
-import com.ai.receptionist.service.YesNoClassifier;
+import com.ai.receptionist.service.YesNoClassifierService;
 import com.ai.receptionist.service.LlmService;
 import com.ai.receptionist.service.SttService;
 import com.ai.receptionist.service.TwilioService;
@@ -45,7 +45,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
     private final BookingFlowService bookingFlowService;
-    private final YesNoClassifier yesNoClassifier;
+    private final YesNoClassifierService yesNoClassifier;
 
     @Value("${openai.api-key:}")
     private String openAiApiKey;
@@ -59,7 +59,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             TwilioService twilioService,
             ConversationStore conversationStore,
             BookingFlowService bookingFlowService,
-            YesNoClassifier yesNoClassifier
+            YesNoClassifierService yesNoClassifier
     ) {
         this.sttService = sttService;
         this.llmService = llmService;

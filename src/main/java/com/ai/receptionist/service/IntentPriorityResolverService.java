@@ -8,17 +8,9 @@ import java.util.Comparator;
 import java.util.Optional;
 import java.util.Set;
 
-/**
- * Resolves which intent to act on first when multiple intents exist.
- * Higher priority intents override lower ones (e.g. ASK_DOCTOR_INFO overrides CONFIRM_YES).
- */
 @Service
-public class IntentPriorityResolver {
+public class IntentPriorityResolverService {
 
-    /**
-     * Priority order (1 = highest). Lower number = higher priority.
-     * When multiple intents exist, the highest-priority one is resolved first.
-     */
     private static final int PRIORITY_ASK_DOCTOR_INFO = 1;
     private static final int PRIORITY_CHANGE_DOCTOR = 2;
     private static final int PRIORITY_REQUEST_SLOTS = 3;
@@ -27,15 +19,10 @@ public class IntentPriorityResolver {
     private static final int PRIORITY_CONFIRM_NO = 6;
     private static final int PRIORITY_DEFAULT = 99;
 
-    /**
-     * Returns the single intent to act on when awaiting booking confirmation.
-     * If ASK_DOCTOR_INFO or CHANGE_DOCTOR is present, they override CONFIRM_YES.
-     */
     public Optional<ConversationIntent> resolveForBookingConfirmation(IntentResult result) {
         if (result == null || result.getIntents().isEmpty()) return Optional.empty();
         Set<ConversationIntent> intents = result.getIntents();
 
-        // Strict gate: multiple intents = do NOT book; resolve higher priority first
         if (intents.size() > 1 && result.hasConflict()) {
             return Optional.of(getHighestPriority(intents));
         }
@@ -48,17 +35,12 @@ public class IntentPriorityResolver {
         return Optional.of(getHighestPriority(intents));
     }
 
-    /**
-     * Returns true if booking is allowed: exactly CONFIRM_YES and no conflict.
-     */
+
     public boolean isBookingAllowed(IntentResult result) {
         if (result == null) return false;
         return result.isSingleIntent(ConversationIntent.CONFIRM_YES) && !result.hasConflict();
     }
 
-    /**
-     * Returns true if we should defer confirmation and handle doctor-info first.
-     */
     public boolean shouldDeferConfirmationForDoctorInfo(IntentResult result) {
         if (result == null || result.getIntents().isEmpty()) return false;
         return result.hasIntent(ConversationIntent.ASK_DOCTOR_INFO)
@@ -80,7 +62,7 @@ public class IntentPriorityResolver {
 
     private static ConversationIntent getHighestPriority(Set<ConversationIntent> intents) {
         return intents.stream()
-                .min(Comparator.comparingInt(IntentPriorityResolver::priority))
+                .min(Comparator.comparingInt(IntentPriorityResolverService::priority))
                 .orElse(ConversationIntent.NONE);
     }
 }

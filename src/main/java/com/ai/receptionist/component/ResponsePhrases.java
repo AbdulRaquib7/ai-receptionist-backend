@@ -1,11 +1,7 @@
-package com.ai.receptionist.service;
+package com.ai.receptionist.component;
 
 import org.springframework.stereotype.Component;
 
-/**
- * Human-like response phrases. Used when flow logic generates replies.
- * Phrases are conversational, warm, and non-robotic.
- */
 @Component
 public class ResponsePhrases {
 

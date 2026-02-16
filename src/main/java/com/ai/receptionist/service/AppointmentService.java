@@ -25,16 +25,11 @@ public class AppointmentService {
     private final PatientRepository patientRepository;
     private final AppointmentRepository appointmentRepository;
 
-    // =========================================================
-    // DOCTORS
-    // =========================================================
+
     public List<Doctor> getAllDoctors() {
         return doctorRepository.findByActiveTrue();
     }
 
-    // =========================================================
-    // AVAILABLE SLOTS (NEXT 7 DAYS)
-    // =========================================================
     public Map<String, Map<String, List<String>>> getAvailableSlotsForNextWeek() {
 
         LocalDate today = LocalDate.now();
@@ -173,7 +168,6 @@ public class AppointmentService {
             return Optional.empty();
         }
 
-        // Find or create patient by twilio + name - same number can have multiple appointments (different people)
         String name = StringUtils.hasText(patientName) ? patientName : "Unknown";
         Patient patient = patientRepository
                 .findFirstByTwilioPhoneAndNameIgnoreCase(twilioPhone, name)

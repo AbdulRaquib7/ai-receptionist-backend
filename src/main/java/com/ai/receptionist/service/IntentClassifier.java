@@ -71,10 +71,6 @@ public class IntentClassifier {
             Pattern.CASE_INSENSITIVE
     );
 
-    /**
-     * Multi-intent classification. Returns all detected intents and whether they conflict.
-     * Example: "Yes confirm, but before that tell me about Dr John" → {CONFIRM_YES, ASK_DOCTOR_INFO}, hasConflict=true
-     */
     public IntentResult classifyMulti(String userText, boolean awaitingBookingConfirmation) {
         if (userText == null || userText.isBlank()) return IntentResult.empty();
         String t = userText.trim();
@@ -140,7 +136,6 @@ public class IntentClassifier {
         return new IntentResult(intents, hasConflict);
     }
 
-    /** Legacy single-intent; uses multi-classify. When CONFIRM_YES + ASK_DOCTOR_INFO, returns ASK_DOCTOR_INFO. */
     public ConversationIntent classify(String userText, boolean awaitingBookingConfirmation) {
         IntentResult r = classifyMulti(userText, awaitingBookingConfirmation);
         if (r.getIntents().isEmpty() || r.getIntents().contains(ConversationIntent.NONE)) {

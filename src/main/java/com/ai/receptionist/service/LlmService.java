@@ -22,9 +22,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Generates replies using OpenAI Chat Completions.
- */
 @Service
 public class LlmService {
 
@@ -155,10 +152,6 @@ public class LlmService {
         }
     }
 
-    /**
-     * Format slot times as human-readable ranges. E.g. [06:00 PM, 07:00 PM, 08:00 PM, 09:00 PM] -> "6 to 9 PM".
-     * Consecutive half-hour slots are grouped.
-     */
     public static String formatSlotsAsRanges(List<String> times) {
         if (times == null || times.isEmpty()) return "";
         List<Integer> minutesFromMidnight = new ArrayList<>();
