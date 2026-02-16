@@ -276,9 +276,7 @@ public class BookingFlowService {
             }
             s.pendingChooseCancelAppointment = true;
             s.pendingConfirmCancel = false;
-            String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
-                    .reduce((x, y) -> x + "; " + y).orElse("");
-            return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to cancel? Say the name.");
+            return Optional.of("You have multiple appointments. Please say the patient name for the one you want to cancel, for example 'cancel John Cena'.");
         }
 
         if (state != null && state.pendingRescheduleDetails) {
@@ -334,12 +332,27 @@ public class BookingFlowService {
                         return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
                     }
                 }
+                // If user mentions a specific date (e.g. "if I have any appointment on Feb 17"), and there is
+                // exactly one appointment on that date, pick it without reading all appointments.
+                if (StringUtils.isNotBlank(extracted.date)) {
+                    String targetDate = normalizeDate(extracted.date);
+                    if (targetDate != null) {
+                        List<AppointmentService.AppointmentSummary> onDate = list.stream()
+                                .filter(a -> targetDate.equals(a.slotDate))
+                                .toList();
+                        if (onDate.size() == 1) {
+                            AppointmentService.AppointmentSummary a = onDate.get(0);
+                            PendingStateDto s = getOrCreate(callSid);
+                            s.pendingRescheduleDetails = true;
+                            s.reschedulePatientName = a.patientName;
+                            return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
+                        }
+                    }
+                }
                 PendingStateDto s = getOrCreate(callSid);
                 s.pendingChooseRescheduleAppointment = true;
                 s.pendingRescheduleDetails = false;
-                String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
-                        .reduce((x, y) -> x + "; " + y).orElse("");
-                return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to reschedule? Say the name.");
+                return Optional.of("You have multiple appointments. Please say the patient name for the one you want to reschedule, for example 'reschedule John Cena'.");
             }
             Optional<AppointmentService.AppointmentSummary> existingSummary = Optional.of(list.get(0));
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
@@ -650,19 +663,27 @@ public class BookingFlowService {
         List<String> samples = new ArrayList<>();
         List<String> dateOrder = new ArrayList<>(byDate.keySet());
         Collections.sort(dateOrder);
+
+        // When caller explicitly asks for specific dates (e.g. "tomorrow", "day after"),
+        // only show those dates. If there are no slots on them, let caller know instead of
+        // silently falling back to other days.
         if (!requestedDates.isEmpty()) {
             for (String d : requestedDates) {
                 List<String> times = byDate.get(d);
-                if (times != null && !times.isEmpty())
+                if (times != null && !times.isEmpty()) {
                     samples.add(d + ": " + LlmService.formatSlotsAsRanges(times));
+                }
             }
+            return samples;
         }
+
+        // Generic availability: first few dates with any slots.
         for (String date : dateOrder) {
             if (samples.size() >= MAX_SLOT_SAMPLES) break;
-            if (requestedDates.contains(date)) continue;
             List<String> times = byDate.get(date);
-            if (times != null && !times.isEmpty())
+            if (times != null && !times.isEmpty()) {
                 samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
+            }
         }
         return samples;
     }
