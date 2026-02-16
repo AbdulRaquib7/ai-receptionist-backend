@@ -1,8 +1,9 @@
 package com.ai.receptionist.service;
 
-import com.ai.receptionist.conversation.YesNoResult;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
+
+import com.ai.receptionist.utils.YesNoResult;
 
 import java.util.Set;
 import java.util.regex.Pattern;

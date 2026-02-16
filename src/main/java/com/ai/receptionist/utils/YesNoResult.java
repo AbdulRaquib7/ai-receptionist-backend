@@ -1,4 +1,4 @@
-package com.ai.receptionist.conversation;
+package com.ai.receptionist.utils;
 
 /**
  * Result of YES/NO intent classification.

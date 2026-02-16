@@ -2,7 +2,7 @@ package com.ai.receptionist.dto;
 
 import java.io.Serializable;
 
-import com.ai.receptionist.conversation.ConversationState;
+import com.ai.receptionist.utils.ConversationState;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;

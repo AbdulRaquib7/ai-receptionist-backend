@@ -3,6 +3,8 @@ package com.ai.receptionist.conversation;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import com.ai.receptionist.utils.ConversationState;
+
 /**
  * Per-call conversation state. Maintains current flow, previous state for
  * interruption recovery, and collected data. All business data from DB.

@@ -4,6 +4,8 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
+import com.ai.receptionist.utils.ConversationIntent;
+
 /**
  * Result of multi-intent classification. Supports conflict detection for strict confirmation gating.
  */

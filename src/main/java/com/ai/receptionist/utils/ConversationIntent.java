@@ -1,4 +1,4 @@
-package com.ai.receptionist.conversation;
+package com.ai.receptionist.utils;
 
 /**
  * Disambiguated intents for the conversation flow.

@@ -1,4 +1,4 @@
-package com.ai.receptionist.conversation;
+package com.ai.receptionist.utils;
 
 /**
  * State machine for the AI receptionist conversation flow.

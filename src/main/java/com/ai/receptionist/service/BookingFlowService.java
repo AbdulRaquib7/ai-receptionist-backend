@@ -1,12 +1,12 @@
 package com.ai.receptionist.service;
 
 import com.ai.receptionist.component.ResponsePhrases;
-import com.ai.receptionist.conversation.ConversationIntent;
 import com.ai.receptionist.conversation.IntentResult;
 import com.ai.receptionist.dto.PendingStateDto;
 import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Doctor;
-import com.ai.receptionist.conversation.ConversationState;
+import com.ai.receptionist.utils.ConversationIntent;
+import com.ai.receptionist.utils.ConversationState;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;

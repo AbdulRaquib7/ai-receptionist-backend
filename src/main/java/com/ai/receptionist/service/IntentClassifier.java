@@ -1,7 +1,8 @@
 package com.ai.receptionist.service;
 
-import com.ai.receptionist.conversation.ConversationIntent;
 import com.ai.receptionist.conversation.IntentResult;
+import com.ai.receptionist.utils.ConversationIntent;
+
 import org.springframework.stereotype.Service;
 
 import java.util.EnumSet;
