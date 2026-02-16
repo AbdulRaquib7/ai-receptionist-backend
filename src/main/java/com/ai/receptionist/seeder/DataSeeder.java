@@ -1,4 +1,4 @@
-package com.ai.receptionist.config;
+package com.ai.receptionist.seeder;
 
 import com.ai.receptionist.entity.AppointmentSlot;
 import com.ai.receptionist.entity.Doctor;
@@ -43,7 +43,7 @@ public class DataSeeder {
                     .scheduleEnd("14:00")
                     .active(true)
                     .build();
-            Doctor drEvening = Doctor.builder()
+            Doctor drAlan = Doctor.builder()
                     .key("dr-alan")
                     .name("Dr Alan")
                     .specialization("Dentist")
@@ -54,11 +54,11 @@ public class DataSeeder {
 
             drAhmed = doctorRepo.save(drAhmed);
             drJohn = doctorRepo.save(drJohn);
-            drEvening = doctorRepo.save(drEvening);
+            drAlan = doctorRepo.save(drAlan);
 
             String[] ahmedSlots = {"09:00 AM", "09:30 AM", "10:00 AM", "10:30 AM", "11:00 AM", "11:30 AM"};
             String[] johnSlots = {"12:00 PM", "12:30 PM", "01:00 PM", "01:30 PM"};
-            String[] eveningSlots = {"06:00 PM", "06:30 PM", "07:00 PM", "07:30 PM", "08:00 PM", "08:30 PM", "09:00 PM", "09:30 PM"};
+            String[] alanSlots = {"06:00 PM", "06:30 PM", "07:00 PM", "07:30 PM", "08:00 PM", "08:30 PM", "09:00 PM", "09:30 PM"};
 
             List<AppointmentSlot> slots = new ArrayList<>();
             LocalDate today = LocalDate.now();
@@ -70,8 +70,8 @@ public class DataSeeder {
                 for (String t : johnSlots) {
                     slots.add(AppointmentSlot.builder().doctor(drJohn).slotDate(date).startTime(t).status(AppointmentSlot.Status.AVAILABLE).build());
                 }
-                for (String t : eveningSlots) {
-                    slots.add(AppointmentSlot.builder().doctor(drEvening).slotDate(date).startTime(t).status(AppointmentSlot.Status.AVAILABLE).build());
+                for (String t : alanSlots) {
+                    slots.add(AppointmentSlot.builder().doctor(drAlan).slotDate(date).startTime(t).status(AppointmentSlot.Status.AVAILABLE).build());
                 }
             }
             slotRepo.saveAll(slots);

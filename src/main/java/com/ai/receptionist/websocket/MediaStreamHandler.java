@@ -156,36 +156,28 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
-    /**
-     * Returns true only when conversation is truly finished. Do NOT end when AI asks a question.
-     * Safe rules: end only when user explicitly declines more help or says goodbye.
-     */
     private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
 
-        // NEVER end when AI ends with a question - wait for user response
         if (ai.contains("anything else i can help") || ai.contains("anything else") && ai.contains("help")
                 || ai.contains("can i help you with") || ai.contains("help you with anything")
                 || ai.contains("what can i help") || ai.contains("would you like me to confirm")) {
             return false;
         }
 
-        // User declined more help: short "no" when AI is about to say goodbye
         if ((user.equals("no") || user.equals("nope") || user.equals("nah")) && !hasPending) {
             if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care") || ai.contains("bye")) {
                 return true;
             }
         }
 
-        // User said goodbye / end call
         if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")
                 || (user.contains("thank you") && (user.contains("bye") || user.contains("that's all")))) {
             return true;
         }
 
-        // AI said explicit final goodbye (after user declined)
         if (ai.contains("have a good day") || ai.contains("have a great day") || ai.contains("take care")
                 || ai.contains("feel free to call") || ai.contains("thank you for calling")) {
             return true;
