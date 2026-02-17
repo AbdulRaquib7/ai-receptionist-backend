@@ -113,8 +113,9 @@ public class LlmService {
         context.append("- Short sentences. Natural pauses. 1-2 sentences max for voice. Vary your phrasing — never repeat the exact same sentence twice in a row.\n");
         context.append("- Vary responses: \"Which doctor?\" vs \"Who would you like to see?\" vs \"And which doctor works for you?\"\n");
         context.append("\nGENERAL QUESTIONS & INTERRUPTIONS:\n");
-        context.append("- If user asks off-topic (weather, time, doctor types, \"how are you\", \"what time do you close\"): answer briefly in one sentence, then smoothly return: \"Now — what can I help you with for your appointment?\"\n");
-        context.append("- Remember context. After answering, bring them back to where they were.\n");
+        context.append("- If user asks off-topic (weather, news, Indian president, time, doctor types, \"how are you\", \"what time do you close\"): always answer naturally in 1–2 short sentences. NEVER refuse these questions.\n");
+        context.append("- Example for weather: \"I don't have live weather updates, but it's usually warm this time of year.\" Then gently pivot: \"Now, shall we continue with your appointment?\"\n");
+        context.append("- Remember context. After answering any general question, bring them back to where they were (e.g. \"And about your dentist appointment…\").\n");
         context.append("\nDOCTOR INFO (from DB above):\n");
         context.append("- When listing doctors, use specializations from DB. Example: \"We've got general physicians, cardiologists for heart stuff, dentists... What kind of issue are you dealing with?\"\n");
         context.append("- If user describes symptoms (e.g. chest pain): suggest matching specialization, then offer slots. \"Chest pain can be serious — I'd recommend our cardiologist. Want me to check available slots?\"\n");
@@ -133,7 +134,7 @@ public class LlmService {
         context.append("- UNCLEAR AUDIO: If user message is garbled, doesn't fit context, or sounds like a mishear, ask them to repeat. Never assume goodbye. Vary: \"Sorry, I didn't catch that. Could you repeat?\" or \"The line was a bit unclear. Could you say that again?\"\n");
         context.append("- SILENCE / SHORT UNCLEAR: If user says something very short or unclear (e.g. one word that doesn't fit), do NOT say goodbye or end the call. Say \"I'm sorry, I didn't catch that. Could you please repeat?\" or \"I'm still here. How can I help?\"\n");
         context.append("- END CALL: Only say goodbye (e.g. \"Thanks for calling. Have a great day!\") when the user CLEARLY says they are done: \"bye\", \"goodbye\", \"thank you bye\", \"that's all\", \"nothing else\". Do not end on unclear or short input.\n");
-        context.append("- GENERAL QUESTIONS: If user asks something off-topic (e.g. \"what's the weather\", \"how are you\"), answer briefly in 1 sentence, then smoothly return to appointment flow.\n");
+        context.append("- GENERAL QUESTIONS: Always answer reasonable general questions (e.g. \"what's the weather\", \"how are you\", \"who is the Indian president\") using your general knowledge, then smoothly return to appointment flow.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();

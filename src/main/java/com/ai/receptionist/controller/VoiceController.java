@@ -106,9 +106,11 @@ public class VoiceController {
      * Do NOT redirect to inbound (that would replay "Hello, how can I help you?").
      */
     private ResponseEntity<String> continueCallTwiMl() {
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" +
+                escapeXml(responsePhrases.stillHere()) + "</prosody></Say>";
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
-        String twiml = "<Response>" + connectTwiml + "</Response>";
-        log.info("Continue call -> re-connect stream (no I'm listening)");
+        String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
+        log.info("Continue call -> re-connect stream (\"I'm still here — please go ahead\")");
         return ResponseEntity.ok(twiml);
     }
 

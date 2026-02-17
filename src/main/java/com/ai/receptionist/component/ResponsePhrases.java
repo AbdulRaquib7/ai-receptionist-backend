@@ -74,11 +74,11 @@ public class ResponsePhrases {
     }
 
     public String stillThere() {
-        return "Hey, are you still there?";
+        return "Are you still there?";
     }
 
     public String stillHere() {
-        return "I'm still here. Please go ahead.";
+        return "I'm still here — please go ahead.";
     }
 
     public String sorryFixIt() {
@@ -90,7 +90,7 @@ public class ResponsePhrases {
     }
 
     public String unclearAskAgain() {
-        return "I'm sorry, the line was a bit unclear. Could you say that again?";
+        return "I'm sorry, I didn't catch that clearly. Could you please repeat in English?";
     }
 
     public String clarifyWhatHappened() {

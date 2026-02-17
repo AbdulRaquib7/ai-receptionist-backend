@@ -1,6 +1,7 @@
 package com.ai.receptionist.websocket;
 
 import com.ai.receptionist.component.ConversationStore;
+import com.ai.receptionist.component.ResponsePhrases;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.service.BookingFlowService;
 import com.ai.receptionist.service.YesNoClassifierService;
@@ -46,6 +47,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final ConversationStore conversationStore;
     private final BookingFlowService bookingFlowService;
     private final YesNoClassifierService yesNoClassifier;
+    private final ResponsePhrases phrases;
 
     @Value("${openai.api-key:}")
     private String openAiApiKey;
@@ -59,7 +61,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             TwilioService twilioService,
             ConversationStore conversationStore,
             BookingFlowService bookingFlowService,
-            YesNoClassifierService yesNoClassifier
+            YesNoClassifierService yesNoClassifier,
+            ResponsePhrases phrases
     ) {
         this.sttService = sttService;
         this.llmService = llmService;
@@ -67,6 +70,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         this.conversationStore = conversationStore;
         this.bookingFlowService = bookingFlowService;
         this.yesNoClassifier = yesNoClassifier;
+        this.phrases = phrases;
     }
 
     static class StreamState {
@@ -74,6 +78,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         int silenceFrames = 0;
         boolean processing = false;
         boolean closed = false;
+        /** Counts consecutive unclear/silent utterances to drive gentle timeout prompts. */
+        int unclearUtterances = 0;
         String callSid;
         String fromNumber;
     }
@@ -156,6 +162,59 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
+    /**
+     * Handle cases where STT could not confidently extract user speech
+     * (pure silence, very short noise, or nonsensical content).
+     * We do NOT treat this as the user ending the call; instead we gently
+     * prompt them, then only after multiple missed turns we hang up.
+     */
+    private void handleUnclearUtterance(StreamState state) {
+        if (state == null || state.closed) {
+            return;
+        }
+        state.unclearUtterances++;
+        String callSid = state.callSid;
+        if (callSid == null || callSid.isEmpty()) {
+            return;
+        }
+
+        String prompt;
+        boolean endCall = false;
+
+        // 1st time: simple "I didn't catch that" clarification
+        if (state.unclearUtterances == 1) {
+            prompt = phrases != null
+                    ? phrases.couldYouRepeat()
+                    : "Sorry, I didn't catch that. Could you repeat?";
+        }
+        // 2nd time: reassure we're still on the line
+        else if (state.unclearUtterances == 2) {
+            prompt = phrases != null
+                    ? phrases.stillHere()
+                    : "Hello? I'm here. Please go ahead.";
+        }
+        // 3rd time: explicit "are you still there?"
+        else if (state.unclearUtterances == 3) {
+            prompt = phrases != null
+                    ? phrases.stillThere()
+                    : "Are you still there?";
+        }
+        // 4th+ time: assume user has left, politely end
+        else {
+            prompt = phrases != null
+                    ? phrases.goodbye()
+                    : "Alright, have a good day! Bye.";
+            endCall = true;
+        }
+
+        log.info("AI | {}", prompt);
+        conversationStore.appendAssistant(callSid, state.fromNumber != null ? state.fromNumber : "", prompt);
+        twilioService.speakResponse(callSid, prompt, endCall);
+        if (endCall) {
+            state.closed = true;
+        }
+    }
+
     private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
@@ -195,20 +254,33 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 }
 
                 String userText = sttService.transcribe(audio);
-                if (StringUtils.isBlank(userText)) return;
-                if (userText.length() < 2) return;
-                if (userText.length() < 5 && !yesNoClassifier.isShortAffirmativeOrNegative(userText)) return;
+                if (StringUtils.isBlank(userText)) {
+                    handleUnclearUtterance(state);
+                    return;
+                }
+                String trimmed = userText.trim();
+                if (trimmed.length() < 2) {
+                    handleUnclearUtterance(state);
+                    return;
+                }
+                if (trimmed.length() < 5 && !yesNoClassifier.isShortAffirmativeOrNegative(trimmed)) {
+                    handleUnclearUtterance(state);
+                    return;
+                }
+
+                // We have a proper utterance; reset unclear counter.
+                state.unclearUtterances = 0;
 
                 String fromNumber = state.fromNumber != null ? state.fromNumber : "";
-                log.info("USER | {}", userText);
-                conversationStore.appendUser(callSid, fromNumber, userText);
+                log.info("USER | {}", trimmed);
+                conversationStore.appendUser(callSid, fromNumber, trimmed);
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
                 List<String> summary = history.stream()
                         .map(m -> m.getRole() + ": " + m.getContent())
                         .collect(java.util.stream.Collectors.toList());
 
                 Optional<String> flowReply = bookingFlowService.processUserMessage(
-                        callSid, fromNumber, userText, summary, openAiApiKey, openAiModel);
+                        callSid, fromNumber, trimmed, summary, openAiApiKey, openAiModel);
                 String aiText = flowReply.orElseGet(() -> llmService.generateReply(callSid, fromNumber, history));
                 if (StringUtils.isBlank(aiText)) return;
 
@@ -217,7 +289,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 boolean hasPending = bookingFlowService.getPending(callSid) != null
                         && bookingFlowService.getPending(callSid).hasAnyPending();
-                boolean endCall = isConversationEnded(aiText, userText, hasPending);
+                boolean endCall = isConversationEnded(aiText, trimmed, hasPending);
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }

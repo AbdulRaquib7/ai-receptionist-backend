@@ -7,6 +7,7 @@ import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Doctor;
 import com.ai.receptionist.utils.ConversationIntent;
 import com.ai.receptionist.utils.ConversationState;
+import com.ai.receptionist.utils.YesNoResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -57,6 +58,12 @@ public class BookingFlowService {
         userText = normalizeAppointmentTypo(userText);
         String normalized = userText.toLowerCase().trim();
         PendingStateDto state = pendingByCall.get(callSid);
+
+        // If user spoke in a non-English language or the text is mostly non-ASCII,
+        // do NOT try to interpret slots/doctor intents. Ask them to repeat in English instead.
+        if (isLikelyForeignOrUnclearText(userText)) {
+            return Optional.of(phrases.unclearAskAgain());
+        }
 
         if (wantsToEndCall(normalized)) {
             return Optional.of(phrases.goodbye());
@@ -152,22 +159,20 @@ public class BookingFlowService {
 
         if (state != null && (state.pendingConfirmBook || state.pendingConfirmCancel || state.pendingConfirmReschedule)
                 && yesNoClassifier.isNegative(userText)) {
+            // If the user says NO to a cancel confirmation, exit the cancel flow completely
+            // and clear any pending cancel state so we don't re-enter a cancel loop.
+            if (state.pendingConfirmCancel && state.currentState == ConversationState.CANCEL_APPOINTMENT) {
+                clearPending(callSid);
+                return Optional.of("No problem, I won't cancel it. Do you want to try something else, or should I end the call?");
+            }
+
+            // For booking / reschedule confirmations, fall back to the generic "no changes" flow.
             state.pendingConfirmBook = false;
             state.pendingConfirmCancel = false;
             state.pendingConfirmReschedule = false;
             state.pendingConfirmAbort = true;
             state.currentState = ConversationState.CONFIRM_ABORT;
             return Optional.of(phrases.noChangesAbortChoice());
-        }
-
-        if ((state == null || !state.hasAnyPending()) && (normalized.equals("no") || normalized.equals("nope"))) {
-            if (conversationSummary != null && !conversationSummary.isEmpty()) {
-                String lastMsg = conversationSummary.get(conversationSummary.size() - 1);
-                String lastLower = lastMsg.toLowerCase();
-                if (lastLower.contains("assistant:") && (lastLower.contains("anything else") || lastLower.contains("help you with"))) {
-                    return Optional.of(phrases.goodbye());
-                }
-            }
         }
 
         if (state != null && state.pendingConfirmAbort) {
@@ -180,6 +185,31 @@ public class BookingFlowService {
                 return Optional.of(phrases.startOver());
             }
             state.pendingConfirmAbort = false;
+        }
+
+        // Handle short YES/NO and pure "thanks" responses contextually
+        // *before* heavy intent extraction, to avoid accidental cancel/reschedule triggers.
+        YesNoResult yesNo = yesNoClassifier.classify(userText);
+        boolean isShortYesNo = userText.trim().length() <= 15 && yesNo != YesNoResult.UNKNOWN;
+
+        // Pure "thanks"/"thank you" handling – often comes after "anything else?" or "end the call?"
+        if (isPureThanks(normalized)) {
+            if (conversationSummary != null && !conversationSummary.isEmpty()) {
+                String lastMsg = conversationSummary.get(conversationSummary.size() - 1).toLowerCase();
+                if (lastMsg.contains("assistant:")
+                        && (lastMsg.contains("anything else") || lastMsg.contains("help you with") || lastMsg.contains("end the call"))) {
+                    clearPending(callSid);
+                    return Optional.of(phrases.goodbye());
+                }
+            }
+            return Optional.of("You're welcome. Is there anything else I can help you with?");
+        }
+
+        if ((state == null || !state.hasAnyPending()) && isShortYesNo) {
+            Optional<String> handledYesNo = handleShortYesNoWithoutPending(callSid, yesNo, conversationSummary);
+            if (handledYesNo.isPresent()) {
+                return handledYesNo;
+            }
         }
 
         ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
@@ -215,7 +245,7 @@ public class BookingFlowService {
             PendingStateDto s = getPending(callSid);
             String doctorKey = null;
             if (s != null && s.pendingRescheduleDetails && StringUtils.isNotBlank(s.reschedulePatientName)) {
-                doctorKey = appointmentService.getActiveAppointmentSummary(fromNumber, s.reschedulePatientName)
+                doctorKey = appointmentService.getUpcomingAppointmentSummary(fromNumber, s.reschedulePatientName)
                         .flatMap(a -> appointmentService.getAllDoctors().stream()
                                 .filter(d -> d.getName().equals(a.doctorName))
                                 .findFirst()
@@ -229,7 +259,11 @@ public class BookingFlowService {
                 }
                 doctorKey = nk;
             }
-            if (doctorKey == null && s != null && StringUtils.isNotBlank(s.doctorKey)) {
+            // If user didn't clearly mention a doctor but we already have a doctor in state,
+            // we can reuse it — unless this turn sounds like a fresh symptom-based request
+            // (e.g. "nearest throat doctor"), in which case we should NOT force the old doctor.
+            if (doctorKey == null && s != null && StringUtils.isNotBlank(s.doctorKey)
+                    && !isSymptomBasedDoctorRequest(normalized)) {
                 doctorKey = s.doctorKey;
             }
             if (doctorKey == null) {
@@ -242,16 +276,23 @@ public class BookingFlowService {
             PendingStateDto stateForBook = getOrCreate(callSid);
             stateForBook.doctorKey = resolvedDoctorKey;
             List<String> requestedDates = getRequestedDatesFromUserMessage(normalized);
-            List<String> samples = buildSlotSamplesForDoctor(slots.get(resolvedDoctorKey), requestedDates);
-            if (samples.isEmpty()) {
-                return Optional.of("No slots for that doctor on those dates. Want to try another date or doctor?");
-            }
             List<Doctor> doctors = appointmentService.getAllDoctors();
             String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
-            return Optional.of("Slots for " + docName + " — " + String.join("; ", samples) + ". Pick a time that works.");
+            String nearest = buildNearestSlotSentence(docName, slots.get(resolvedDoctorKey), requestedDates);
+            if (nearest == null) {
+                return Optional.of("No slots for that doctor on those dates. Want to try another date or doctor?");
+            }
+            return Optional.of(nearest);
         }
 
         if (extracted.intent.equals("cancel")) {
+            // Extra safety: only treat this as an explicit cancel request when the user
+            // actually uses a cancel-like word. This prevents LLM extraction from
+            // misclassifying generic "no"/"nope"/"thank you" messages as cancel intents.
+            if (!containsExplicitCancelWord(normalized)) {
+                return Optional.empty();
+            }
+
             List<AppointmentService.AppointmentSummary> list = appointmentService.getUpcomingAppointmentSummaries(fromNumber);
             if (list.isEmpty()) {
                 return Optional.of(phrases.noAppointmentsToCancel());
@@ -282,7 +323,7 @@ public class BookingFlowService {
         }
 
         if (state != null && state.pendingRescheduleDetails) {
-            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getActiveAppointmentSummary(
+            Optional<AppointmentService.AppointmentSummary> existingSummary = appointmentService.getUpcomingAppointmentSummary(
                     fromNumber, state.reschedulePatientName);
             if (existingSummary.isEmpty()) {
                 state.pendingRescheduleDetails = false;
@@ -585,8 +626,30 @@ public class BookingFlowService {
 
     private String normalizeDoctorKey(String userInput) {
         if (userInput == null || userInput.isBlank()) return null;
-        String k = userInput.trim().toLowerCase().replace(".", "").replaceAll("\\s+", "");
+        String lower = userInput.trim().toLowerCase();
+        String k = lower.replace(".", "").replaceAll("\\s+", "");
         List<Doctor> doctors = appointmentService.getAllDoctors();
+
+        // Symptom / lay-term mapping to specializations, driven by DB values.
+        // This keeps behaviour data-driven: we only map to a doctor if a matching
+        // specialization actually exists in the database.
+        String targetSpecialization = null;
+        if (lower.contains("tooth") || lower.contains("teeth") || lower.contains("dental")) {
+            targetSpecialization = "dentist";
+        } else if (lower.contains("heart") || lower.contains("cardio") || lower.contains("chest pain")) {
+            targetSpecialization = "cardiologist";
+        } else if (lower.contains("throat") || lower.contains("ent") || lower.contains("ear") || lower.contains("nose")) {
+            targetSpecialization = "ent";
+        }
+        if (targetSpecialization != null) {
+            for (Doctor d : doctors) {
+                String spec = d.getSpecialization() != null ? d.getSpecialization().toLowerCase() : "";
+                if (spec.contains(targetSpecialization)) {
+                    return d.getKey();
+                }
+            }
+        }
+
         for (Doctor d : doctors) {
             if (d.getKey() != null && d.getKey().toLowerCase().replace("-", "").equals(k)) return d.getKey();
             String nameNorm = d.getName() != null ? d.getName().toLowerCase().replace(".", "").replaceAll("\\s+", "") : "";
@@ -653,8 +716,6 @@ public class BookingFlowService {
         return userText.replaceAll("(?i)\\bapartment\\b", "appointment");
     }
 
-    private static final int MAX_SLOT_SAMPLES = 5;
-
     private List<String> getRequestedDatesFromUserMessage(String normalized) {
         List<String> out = new ArrayList<>();
         String tomorrow = LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE);
@@ -665,26 +726,60 @@ public class BookingFlowService {
         return out;
     }
 
-    private List<String> buildSlotSamplesForDoctor(Map<String, List<String>> byDate, List<String> requestedDates) {
-        if (byDate == null || byDate.isEmpty()) return Collections.emptyList();
-        List<String> samples = new ArrayList<>();
+    /**
+     * Build a single, user-friendly sentence describing the doctor's nearest available slot.
+     * If requestedDates is empty, we look across all future dates; otherwise we try those dates first.
+     */
+    private String buildNearestSlotSentence(String doctorName, Map<String, List<String>> byDate, List<String> requestedDates) {
+        if (byDate == null || byDate.isEmpty()) return null;
+
         List<String> dateOrder = new ArrayList<>(byDate.keySet());
         Collections.sort(dateOrder);
-        if (!requestedDates.isEmpty()) {
-            for (String d : requestedDates) {
-                List<String> times = byDate.get(d);
-                if (times != null && !times.isEmpty())
-                    samples.add(d + ": " + LlmService.formatSlotsAsRanges(times));
+
+        String chosenDate = null;
+        if (requestedDates != null && !requestedDates.isEmpty()) {
+            for (String d : dateOrder) {
+                if (requestedDates.contains(d)) {
+                    List<String> times = byDate.get(d);
+                    if (times != null && !times.isEmpty()) {
+                        chosenDate = d;
+                        break;
+                    }
+                }
             }
         }
-        for (String date : dateOrder) {
-            if (samples.size() >= MAX_SLOT_SAMPLES) break;
-            if (requestedDates.contains(date)) continue;
-            List<String> times = byDate.get(date);
-            if (times != null && !times.isEmpty())
-                samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
+        if (chosenDate == null) {
+            for (String d : dateOrder) {
+                List<String> times = byDate.get(d);
+                if (times != null && !times.isEmpty()) {
+                    chosenDate = d;
+                    break;
+                }
+            }
         }
-        return samples;
+        if (chosenDate == null) return null;
+
+        List<String> times = new ArrayList<>(byDate.get(chosenDate));
+        if (times.isEmpty()) return null;
+        Collections.sort(times);
+        String time = times.get(0);
+
+        LocalDate today = LocalDate.now();
+        String dateText;
+        try {
+            LocalDate d = LocalDate.parse(chosenDate);
+            if (d.equals(today)) {
+                dateText = "today";
+            } else if (d.equals(today.plusDays(1))) {
+                dateText = "tomorrow";
+            } else {
+                dateText = chosenDate;
+            }
+        } catch (Exception e) {
+            dateText = chosenDate;
+        }
+
+        return doctorName + "'s nearest availability is " + dateText + " at " + time + ". Would that work?";
     }
 
     private List<AppointmentService.AppointmentSummary> sortAppointmentsByNearest(List<AppointmentService.AppointmentSummary> list) {
@@ -699,6 +794,95 @@ public class BookingFlowService {
         return normalized.contains("already booked") || normalized.contains("have already booked")
                 || normalized.contains("we booked") || normalized.contains("appointment confirmed")
                 || normalized.contains("appointment is confirmed") || normalized.contains("we have booked");
+    }
+
+    /** Detect symptom-style phrases that imply a specialty (throat, tooth, heart, etc.) rather than a named doctor. */
+    private boolean isSymptomBasedDoctorRequest(String normalized) {
+        if (normalized == null || normalized.isBlank()) return false;
+        String n = normalized.toLowerCase();
+        return n.contains("throat")
+                || n.contains("ear pain")
+                || n.contains("earache")
+                || n.contains("ear problem")
+                || n.contains("tooth")
+                || n.contains("teeth")
+                || n.contains("dental")
+                || n.contains("heart")
+                || n.contains("chest pain");
+    }
+
+    /**
+     * Detect whether the user explicitly expressed a desire to cancel, using
+     * plain-text keywords, independent of LLM extraction. This keeps cancel
+     * behaviour grounded in what the caller actually said.
+     */
+    private boolean containsExplicitCancelWord(String normalized) {
+        if (normalized == null || normalized.isBlank()) return false;
+        String n = normalized.replace("'", ""); // handle "don't" / "dont"
+        return n.contains("cancel")
+                || n.contains("cut appointment")
+                || n.contains("cut the appointment")
+                || n.contains("remove appointment")
+                || n.contains("delete appointment")
+                || n.contains("dont need appointment")
+                || n.contains("don't need appointment");
+    }
+
+    /** Heuristic: input is mostly non-ASCII characters or has no Latin letters -> likely foreign/unclear speech. */
+    private boolean isLikelyForeignOrUnclearText(String text) {
+        if (text == null || text.isBlank()) return false;
+        int nonAscii = 0;
+        int len = text.length();
+        for (int i = 0; i < len; i++) {
+            if (text.charAt(i) > 127) nonAscii++;
+        }
+        boolean noLatinLetters = !text.matches(".*[A-Za-z].*");
+        return (nonAscii > 0 && nonAscii * 2 >= len) || noLatinLetters;
+    }
+
+    private boolean isPureThanks(String normalized) {
+        String n = normalized.replaceAll("[!.]", "").trim();
+        return n.equals("thank you") || n.equals("thanks") || n.equals("thank you so much") || n.equals("thanks a lot");
+    }
+
+    /**
+     * Map short YES/NO answers to the last assistant question, when no booking/cancel state is pending.
+     * Prevents "No"/"Nope" from accidentally being treated as a CANCEL intent on an existing appointment.
+     */
+    private Optional<String> handleShortYesNoWithoutPending(String callSid, YesNoResult yesNo, List<String> conversationSummary) {
+        if (conversationSummary == null || conversationSummary.isEmpty()) {
+            return Optional.empty();
+        }
+        String lastMsg = conversationSummary.get(conversationSummary.size() - 1).toLowerCase();
+        boolean fromAssistant = lastMsg.contains("assistant:");
+
+        if (!fromAssistant) {
+            return Optional.empty();
+        }
+
+        if (yesNo == YesNoResult.NO) {
+            if (lastMsg.contains("anything else") || lastMsg.contains("help you with")) {
+                clearPending(callSid);
+                return Optional.of(phrases.goodbye());
+            }
+            if (lastMsg.contains("end the call")) {
+                clearPending(callSid);
+                return Optional.of(phrases.goodbye());
+            }
+            // Generic "no" that isn't about ending the call – acknowledge but keep the call alive.
+            return Optional.of("No problem. How else can I help you?");
+        }
+
+        if (yesNo == YesNoResult.YES) {
+            if (lastMsg.contains("end the call")) {
+                clearPending(callSid);
+                return Optional.of(phrases.goodbye());
+            }
+            // Generic "yes" – keep conversation open and nudge user.
+            return Optional.of("Sure. What would you like to do?");
+        }
+
+        return Optional.empty();
     }
 
     private String buildUnknownDoctorResponse(String rawDoctorName) {

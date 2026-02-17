@@ -250,7 +250,7 @@ public class AppointmentService {
 
     @Transactional
     public boolean cancelAppointment(String twilioPhone, String patientName) {
-        Optional<Appointment> opt = getActiveAppointmentByTwilioPhoneAndPatientName(twilioPhone, patientName);
+        Optional<Appointment> opt = getUpcomingAppointmentEntity(twilioPhone, patientName);
         if (!opt.isPresent()) return false;
 
         Appointment appt = opt.get();
@@ -278,7 +278,7 @@ public class AppointmentService {
             String newDate,
             String newTime
     ) {
-        Optional<Appointment> existingOpt = getActiveAppointmentByTwilioPhoneAndPatientName(twilioPhone, patientName);
+        Optional<Appointment> existingOpt = getUpcomingAppointmentEntity(twilioPhone, patientName);
         if (!existingOpt.isPresent()) return Optional.empty();
 
         Appointment existing = existingOpt.get();
@@ -329,6 +329,33 @@ public class AppointmentService {
         );
 
         return Optional.of(existing);
+    }
+
+    /**
+     * Find the nearest upcoming confirmed appointment entity for this caller (and optional patient name).
+     * Only considers slots with slotDate >= today so we never cancel/reschedule past appointments.
+     */
+    @Transactional(readOnly = true)
+    private Optional<Appointment> getUpcomingAppointmentEntity(String twilioPhone, String patientName) {
+        LocalDate today = LocalDate.now();
+        List<Appointment> list = appointmentRepository
+                .findByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(twilioPhone, Appointment.Status.CONFIRMED);
+
+        return list.stream()
+                .filter(a -> a.getSlot() != null && a.getSlot().getSlotDate() != null
+                        && !a.getSlot().getSlotDate().isBefore(today))
+                .filter(a -> {
+                    if (patientName == null || patientName.isBlank()) return true;
+                    String dbName = a.getPatient() != null ? a.getPatient().getName() : null;
+                    if (dbName == null || dbName.isBlank()) return false;
+                    String dbLower = dbName.trim().toLowerCase();
+                    String inLower = patientName.trim().toLowerCase();
+                    return dbLower.equals(inLower) || dbLower.contains(inLower) || inLower.contains(dbLower);
+                })
+                .sorted(Comparator
+                        .comparing((Appointment a) -> a.getSlot().getSlotDate())
+                        .thenComparing(a -> a.getSlot().getStartTime() != null ? a.getSlot().getStartTime() : ""))
+                .findFirst();
     }
 
     private static String normalizeTime(String time) {
