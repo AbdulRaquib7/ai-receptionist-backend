@@ -91,6 +91,22 @@ public class AppointmentService {
                 .collect(Collectors.toList());
     }
 
+    /** Upcoming appointments only: slot date >= today. Use for listing, cancel, reschedule so we never mention past appointments. */
+    @Transactional(readOnly = true)
+    public List<AppointmentSummary> getUpcomingAppointmentSummaries(String twilioPhone) {
+        LocalDate today = LocalDate.now();
+        return getActiveAppointmentSummaries(twilioPhone).stream()
+                .filter(a -> a.slotDate != null && !a.slotDate.isBlank())
+                .filter(a -> {
+                    try {
+                        return !LocalDate.parse(a.slotDate).isBefore(today);
+                    } catch (Exception e) {
+                        return true;
+                    }
+                })
+                .collect(Collectors.toList());
+    }
+
     @Transactional(readOnly = true)
     public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone) {
         List<AppointmentSummary> list = getActiveAppointmentSummaries(twilioPhone);
@@ -109,8 +125,24 @@ public class AppointmentService {
                 a.getPatient().getName(),
                 a.getDoctor().getName(),
                 a.getSlot().getSlotDate().toString(),
-                a.getSlot().getStartTime()
-        ));
+                a.getSlot().getStartTime()));
+    }
+
+    /** Upcoming appointment by patient name; empty if not found or appointment is in the past. */
+    @Transactional(readOnly = true)
+    public Optional<AppointmentSummary> getUpcomingAppointmentSummary(String twilioPhone, String patientName) {
+        List<AppointmentSummary> upcoming = getUpcomingAppointmentSummaries(twilioPhone);
+        if (patientName == null || patientName.isBlank()) {
+            return upcoming.isEmpty() ? Optional.empty() : Optional.of(upcoming.get(0));
+        }
+        String nameLower = patientName.trim().toLowerCase();
+        Optional<AppointmentSummary> exact = upcoming.stream()
+                .filter(a -> a.patientName != null && a.patientName.trim().equalsIgnoreCase(patientName.trim()))
+                .findFirst();
+        if (exact.isPresent()) return exact;
+        return upcoming.stream()
+                .filter(a -> a.patientName != null && (a.patientName.toLowerCase().contains(nameLower) || nameLower.contains(a.patientName.toLowerCase())))
+                .findFirst();
     }
 
     public static class AppointmentSummary {

@@ -54,6 +54,7 @@ public class BookingFlowService {
                                                 List<String> conversationSummary, String openAiKey, String openAiModel) {
         if (StringUtils.isBlank(userText)) return Optional.empty();
 
+        userText = normalizeAppointmentTypo(userText);
         String normalized = userText.toLowerCase().trim();
         PendingStateDto state = pendingByCall.get(callSid);
 
@@ -72,7 +73,7 @@ public class BookingFlowService {
         }
 
         if (isAlreadyBookedAcknowledgment(normalized)) {
-            List<AppointmentService.AppointmentSummary> appts = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            List<AppointmentService.AppointmentSummary> appts = appointmentService.getUpcomingAppointmentSummaries(fromNumber);
             if (!appts.isEmpty()) {
                 AppointmentService.AppointmentSummary a = appts.get(0);
                 return Optional.of("Yes, you're all set. Your appointment with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + " is confirmed. Anything else I can help with?");
@@ -116,11 +117,11 @@ public class BookingFlowService {
         if (state != null && state.pendingChooseCancelAppointment) {
             String name = extractIntent(userText, conversationSummary, openAiKey, openAiModel).patientName;
             if (StringUtils.isNotBlank(name)) {
-                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, name);
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getUpcomingAppointmentSummary(fromNumber, name);
                 if (match.isPresent()) {
                     state.pendingChooseCancelAppointment = false;
                     state.pendingConfirmCancel = true;
-                    state.cancelPatientName = name;
+                    state.cancelPatientName = match.get().patientName;
                     AppointmentService.AppointmentSummary a = match.get();
                     return Optional.of(phrases.confirmCancelPrompt(a.patientName, a.doctorName, a.slotDate, a.startTime));
                 }
@@ -130,11 +131,11 @@ public class BookingFlowService {
         if (state != null && state.pendingChooseRescheduleAppointment) {
             String name = extractIntent(userText, conversationSummary, openAiKey, openAiModel).patientName;
             if (StringUtils.isNotBlank(name)) {
-                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, name);
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getUpcomingAppointmentSummary(fromNumber, name);
                 if (match.isPresent()) {
                     state.pendingChooseRescheduleAppointment = false;
                     state.pendingRescheduleDetails = true;
-                    state.reschedulePatientName = name;
+                    state.reschedulePatientName = match.get().patientName;
                     AppointmentService.AppointmentSummary a = match.get();
                     return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
                 }
@@ -197,15 +198,15 @@ public class BookingFlowService {
         }
 
         if (extracted.intent.equals("check_appointments")) {
-            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
-            if (list.isEmpty()) return Optional.of("You don't have any appointments right now.");
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getUpcomingAppointmentSummaries(fromNumber);
+            if (list.isEmpty()) return Optional.of("You don't have any upcoming appointments.");
             List<AppointmentService.AppointmentSummary> sorted = sortAppointmentsByNearest(list);
             if (list.size() == 1) {
                 AppointmentService.AppointmentSummary a = sorted.get(0);
                 return Optional.of("Yeah, you've got one — " + a.patientName + " with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ".");
             }
             AppointmentService.AppointmentSummary nearest = sorted.get(0);
-            return Optional.of("You have " + list.size() + " appointments. Your nearest is " + nearest.patientName + " with " + nearest.doctorName + " on " + nearest.slotDate + " at " + nearest.startTime + ". Want me to list all or help with something specific?");
+            return Optional.of("You have " + list.size() + " upcoming appointments. Your nearest is " + nearest.patientName + " with " + nearest.doctorName + " on " + nearest.slotDate + " at " + nearest.startTime + ". Want me to list all or help with something specific?");
         }
 
         if (extracted.intent.equals("ask_availability") && intentClassifier.classify(userText, false) != ConversationIntent.ASK_DOCTOR_INFO) {
@@ -251,34 +252,33 @@ public class BookingFlowService {
         }
 
         if (extracted.intent.equals("cancel")) {
-            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getUpcomingAppointmentSummaries(fromNumber);
             if (list.isEmpty()) {
                 return Optional.of(phrases.noAppointmentsToCancel());
             }
             PendingStateDto s = getOrCreate(callSid);
             s.pendingConfirmBook = false;
             s.pendingConfirmReschedule = false;
+            List<AppointmentService.AppointmentSummary> sorted = sortAppointmentsByNearest(list);
             if (list.size() == 1) {
                 s.pendingConfirmCancel = true;
-                s.cancelPatientName = null;
+                s.cancelPatientName = sorted.get(0).patientName;
                 s.currentState = ConversationState.CANCEL_APPOINTMENT;
-                AppointmentService.AppointmentSummary a = list.get(0);
+                AppointmentService.AppointmentSummary a = sorted.get(0);
                 return Optional.of(phrases.confirmCancelPrompt(a.patientName, a.doctorName, a.slotDate, a.startTime));
             }
             if (StringUtils.isNotBlank(extracted.patientName)) {
-                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, extracted.patientName);
+                Optional<AppointmentService.AppointmentSummary> match = appointmentService.getUpcomingAppointmentSummary(fromNumber, extracted.patientName);
                 if (match.isPresent()) {
                     s.pendingConfirmCancel = true;
-                    s.cancelPatientName = extracted.patientName;
+                    s.cancelPatientName = match.get().patientName;
                     AppointmentService.AppointmentSummary a = match.get();
                     return Optional.of(phrases.confirmCancelPrompt(a.patientName, a.doctorName, a.slotDate, a.startTime));
                 }
             }
             s.pendingChooseCancelAppointment = true;
             s.pendingConfirmCancel = false;
-            String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
-                    .reduce((x, y) -> x + "; " + y).orElse("");
-            return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to cancel? Say the name.");
+            return Optional.of("You have " + list.size() + " upcoming appointments. Please say the patient name for the one you want to cancel, for example 'cancel John Cena'.");
         }
 
         if (state != null && state.pendingRescheduleDetails) {
@@ -319,29 +319,37 @@ public class BookingFlowService {
         }
 
         if (extracted.intent.equals("reschedule")) {
-            List<AppointmentService.AppointmentSummary> list = appointmentService.getActiveAppointmentSummaries(fromNumber);
+            List<AppointmentService.AppointmentSummary> list = appointmentService.getUpcomingAppointmentSummaries(fromNumber);
             if (list.isEmpty()) {
                 return Optional.of(phrases.noAppointmentsToReschedule());
             }
+            List<AppointmentService.AppointmentSummary> sorted = sortAppointmentsByNearest(list);
+            if (isNearestAppointmentRequest(normalized)) {
+                AppointmentService.AppointmentSummary nearest = sorted.get(0);
+                PendingStateDto s = getOrCreate(callSid);
+                s.pendingRescheduleDetails = true;
+                s.pendingChooseRescheduleAppointment = false;
+                s.reschedulePatientName = nearest.patientName;
+                return Optional.of("Your nearest appointment is " + nearest.patientName + " with " + nearest.doctorName + " on " + nearest.slotDate + " at " + nearest.startTime + ". Please say the new date and time you want.");
+            }
             if (list.size() > 1) {
                 if (StringUtils.isNotBlank(extracted.patientName)) {
-                    Optional<AppointmentService.AppointmentSummary> match = appointmentService.getActiveAppointmentSummary(fromNumber, extracted.patientName);
+                    Optional<AppointmentService.AppointmentSummary> match = appointmentService.getUpcomingAppointmentSummary(fromNumber, extracted.patientName);
                     if (match.isPresent()) {
                         PendingStateDto s = getOrCreate(callSid);
                         s.pendingRescheduleDetails = true;
-                        s.reschedulePatientName = extracted.patientName;
+                        s.reschedulePatientName = match.get().patientName;
                         AppointmentService.AppointmentSummary a = match.get();
                         return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
                     }
                 }
+                AppointmentService.AppointmentSummary nearest = sorted.get(0);
                 PendingStateDto s = getOrCreate(callSid);
                 s.pendingChooseRescheduleAppointment = true;
                 s.pendingRescheduleDetails = false;
-                String names = list.stream().map(a -> a.patientName + " on " + a.slotDate + " at " + a.startTime)
-                        .reduce((x, y) -> x + "; " + y).orElse("");
-                return Optional.of("You have " + list.size() + " appointments: " + names + ". Which one do you want to reschedule? Say the name.");
+                return Optional.of("You have " + list.size() + " upcoming appointments. Your nearest is " + nearest.patientName + " on " + nearest.slotDate + " at " + nearest.startTime + ". Say that name to reschedule it, or say another patient name.");
             }
-            Optional<AppointmentService.AppointmentSummary> existingSummary = Optional.of(list.get(0));
+            Optional<AppointmentService.AppointmentSummary> existingSummary = Optional.of(sorted.get(0));
             if (StringUtils.isNotBlank(extracted.doctorKey) && StringUtils.isNotBlank(extracted.date) && StringUtils.isNotBlank(extracted.time)) {
                 String doctorKey = normalizeDoctorKey(extracted.doctorKey);
                 if (doctorKey == null) {
@@ -370,8 +378,8 @@ public class BookingFlowService {
             PendingStateDto s = getOrCreate(callSid);
             s.pendingRescheduleDetails = true;
             s.pendingConfirmReschedule = false;
-            s.reschedulePatientName = null;
             AppointmentService.AppointmentSummary a = existingSummary.get();
+            s.reschedulePatientName = a.patientName;
             return Optional.of("Your appointment for " + a.patientName + " is with " + a.doctorName + " on " + a.slotDate + " at " + a.startTime + ". Please say the new date and time you want.");
         }
 
@@ -542,10 +550,10 @@ public class BookingFlowService {
     }
 
     private boolean wantsToEndCall(String normalized) {
-        return normalized.contains("end") || normalized.contains("hang up") || normalized.contains("hangup")
-                || normalized.contains("bye") || normalized.contains("goodbye")
-                || normalized.contains("that's all") || normalized.contains("nothing else")
-                || (normalized.length() <= 5 && (normalized.equals("no") || normalized.equals("bye")));
+        return normalized.contains("end call") || normalized.contains("hang up") || normalized.contains("hangup")
+                || normalized.contains("goodbye") || normalized.contains("that's all") || normalized.contains("nothing else")
+                || (normalized.contains("thank you") && normalized.contains("bye"))
+                || (normalized.contains("bye") && normalized.length() <= 15);
     }
 
     private boolean wantsToStartOver(String normalized) {
@@ -631,6 +639,18 @@ public class BookingFlowService {
     private boolean isClarifyWhatHappenedRequest(String normalized) {
         return normalized.contains("what you've done") || normalized.contains("what you did") || normalized.contains("clear what")
                 || normalized.contains("did you cancel") || normalized.contains("did you book") || normalized.contains("cancelled or booked");
+    }
+
+    private boolean isNearestAppointmentRequest(String normalized) {
+        return normalized.contains("nearest appointment") || normalized.contains("next appointment")
+                || normalized.contains("upcoming appointment") || normalized.contains("my nearest")
+                || normalized.contains("reschedule my nearest") || normalized.contains("reschedule nearest");
+    }
+
+    /** Normalize common STT/speech typos so intent is correct (e.g. "apartment" -> "appointment"). */
+    private String normalizeAppointmentTypo(String userText) {
+        if (userText == null || userText.isEmpty()) return userText;
+        return userText.replaceAll("(?i)\\bapartment\\b", "appointment");
     }
 
     private static final int MAX_SLOT_SAMPLES = 5;

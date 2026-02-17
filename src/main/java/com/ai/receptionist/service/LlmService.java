@@ -17,6 +17,8 @@ import org.springframework.web.client.RestTemplate;
 
 import com.ai.receptionist.entity.Doctor;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -55,6 +57,8 @@ public class LlmService {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         StringBuilder context = new StringBuilder();
+        String today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
+        context.append("TODAY'S DATE: ").append(today).append(". Use it for \"today\", \"tomorrow\" (next calendar day), \"next Monday\", etc.\n\n");
         context.append("DATABASE STATE (fetch dynamically - this is the single source of truth):\n\n");
 
         List<Doctor> doctors = appointmentService.getAllDoctors();
@@ -82,10 +86,10 @@ public class LlmService {
         });
 
         List<AppointmentService.AppointmentSummary> appointments = StringUtils.isNotBlank(fromNumber)
-                ? appointmentService.getActiveAppointmentSummaries(fromNumber)
+                ? appointmentService.getUpcomingAppointmentSummaries(fromNumber)
                 : List.of();
         if (!appointments.isEmpty()) {
-            context.append("\nCALLER'S APPOINTMENT(S): ");
+            context.append("\nCALLER'S UPCOMING APPOINTMENT(S) (only future; never mention past): ");
             for (int i = 0; i < appointments.size(); i++) {
                 AppointmentService.AppointmentSummary a = appointments.get(i);
                 if (i > 0) context.append(" | ");
@@ -94,9 +98,14 @@ public class LlmService {
             }
             context.append("\n");
         } else {
-            context.append("\nCALLER HAS NO EXISTING APPOINTMENT.\n");
+            context.append("\nCALLER HAS NO UPCOMING APPOINTMENTS.\n");
         }
 
+        context.append("\nAPPOINTMENT RULES (strict):\n");
+        context.append("- Never mention past or completed appointments. Only use the UPCOMING list above.\n");
+        context.append("- If user asks for \"nearest\" or \"next\" or \"upcoming\" appointment: mention ONLY the single closest upcoming appointment. Do not list all.\n");
+        context.append("- For reschedule/cancel: if listing, list at most 3 upcoming; prefer \"Your nearest is X on date at time. Say that name to reschedule.\"\n");
+        context.append("- Do not repeat the same long list of appointments. If you already said it, say \"Which one? Say the patient name.\" or similar.\n");
         context.append("\nVOICE & PERSONALITY - YOU ARE A REAL HUMAN RECEPTIONIST:\n");
         context.append("- Speak casually but professionally. Friendly, warm, conversational.\n");
         context.append("- Use natural phrases: \"Hey!\", \"Sure!\", \"No worries.\", \"Alright.\", \"Got it.\", \"Okay cool.\", \"Sounds good.\", \"Perfect.\"\n");
@@ -104,7 +113,7 @@ public class LlmService {
         context.append("- Short sentences. Natural pauses. 1-2 sentences max for voice. Vary your phrasing — never repeat the exact same sentence twice in a row.\n");
         context.append("- Vary responses: \"Which doctor?\" vs \"Who would you like to see?\" vs \"And which doctor works for you?\"\n");
         context.append("\nGENERAL QUESTIONS & INTERRUPTIONS:\n");
-        context.append("- If user asks off-topic (weather, time, doctor types, \"how are you\", \"what time do you close\"): answer briefly, then smoothly return: \"Now — you were picking a time. Morning or evening works better?\" or \"What can I help you with for appointments?\"\n");
+        context.append("- If user asks off-topic (weather, time, doctor types, \"how are you\", \"what time do you close\"): answer briefly in one sentence, then smoothly return: \"Now — what can I help you with for your appointment?\"\n");
         context.append("- Remember context. After answering, bring them back to where they were.\n");
         context.append("\nDOCTOR INFO (from DB above):\n");
         context.append("- When listing doctors, use specializations from DB. Example: \"We've got general physicians, cardiologists for heart stuff, dentists... What kind of issue are you dealing with?\"\n");
@@ -121,8 +130,10 @@ public class LlmService {
         context.append("- If user says bye/goodbye: \"Thanks for calling. Take care!\"\n");
         context.append("- If user says \"I'll call later\": \"Sure! No worries. We'll be here. Have a good day!\"\n");
         context.append("- If slot unavailable: \"That one's taken. Want to try a different time?\"\n");
-        context.append("- UNCLEAR AUDIO: If user message is garbled, doesn't fit context, or sounds like a mishear (e.g. wrong doctor name, nonsensical answer), ask them to repeat. Vary: \"Sorry, I didn't catch that. Could you repeat?\" or \"The line was a bit unclear. Could you say that again?\" or \"Sorry, what was that?\"\n");
-        context.append("- GENERAL QUESTIONS: If user asks something off-topic (e.g. \"what's the weather\", \"how are you\", \"tell me about X\" unrelated to doctors/appointments), answer briefly in 1 sentence, then smoothly return to appointment flow.\n");
+        context.append("- UNCLEAR AUDIO: If user message is garbled, doesn't fit context, or sounds like a mishear, ask them to repeat. Never assume goodbye. Vary: \"Sorry, I didn't catch that. Could you repeat?\" or \"The line was a bit unclear. Could you say that again?\"\n");
+        context.append("- SILENCE / SHORT UNCLEAR: If user says something very short or unclear (e.g. one word that doesn't fit), do NOT say goodbye or end the call. Say \"I'm sorry, I didn't catch that. Could you please repeat?\" or \"I'm still here. How can I help?\"\n");
+        context.append("- END CALL: Only say goodbye (e.g. \"Thanks for calling. Have a great day!\") when the user CLEARLY says they are done: \"bye\", \"goodbye\", \"thank you bye\", \"that's all\", \"nothing else\". Do not end on unclear or short input.\n");
+        context.append("- GENERAL QUESTIONS: If user asks something off-topic (e.g. \"what's the weather\", \"how are you\"), answer briefly in 1 sentence, then smoothly return to appointment flow.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();
