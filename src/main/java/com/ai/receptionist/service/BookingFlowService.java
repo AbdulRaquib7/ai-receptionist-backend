@@ -58,8 +58,30 @@ public class BookingFlowService {
         String normalized = userText.toLowerCase().trim();
         PendingStateDto state = pendingByCall.get(callSid);
 
+        // If we're already asking the caller to confirm ending the call,
+        // treat the next short yes/no as confirmation and either hang up
+        // politely or continue the conversation.
+        if (state != null && state.pendingConfirmEndCall) {
+            if (yesNoClassifier.isAffirmative(userText)) {
+                state.pendingConfirmEndCall = false;
+                state.userRequestedEnd = true;
+                clearPending(callSid);
+                return Optional.of(phrases.goodbye());
+            }
+            if (yesNoClassifier.isNegative(userText)) {
+                state.pendingConfirmEndCall = false;
+                state.userRequestedEnd = false;
+                return Optional.of("No problem, we can keep going. What would you like to do next?");
+            }
+            // Unclear answer to end-call confirmation - gently ask again.
+            return Optional.of(phrases.couldYouRepeat());
+        }
+
         if (wantsToEndCall(normalized)) {
-            return Optional.of(phrases.goodbye());
+            PendingStateDto s = getOrCreate(callSid);
+            s.pendingConfirmEndCall = true;
+            s.userRequestedEnd = true;
+            return Optional.of("It sounds like you want to end the call. Would you like me to hang up now?");
         }
 
         if (isListDoctorsRequest(normalized)) {
@@ -241,13 +263,29 @@ public class BookingFlowService {
             final String resolvedDoctorKey = doctorKey;
             PendingStateDto stateForBook = getOrCreate(callSid);
             stateForBook.doctorKey = resolvedDoctorKey;
+
+            Map<String, List<String>> byDate = slots.get(resolvedDoctorKey);
             List<String> requestedDates = getRequestedDatesFromUserMessage(normalized);
-            List<String> samples = buildSlotSamplesForDoctor(slots.get(resolvedDoctorKey), requestedDates);
+            List<Doctor> doctors = appointmentService.getAllDoctors();
+            String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
+
+            // If user did NOT specify a particular date, offer the single nearest slot only.
+            if (requestedDates.isEmpty()) {
+                NearestSlot nearest = findNearestSlot(byDate);
+                if (nearest == null) {
+                    return Optional.of("No slots for that doctor at the moment.");
+                }
+                stateForBook.date = nearest.dateIso;
+                stateForBook.time = nearest.timeDisplay;
+                return Optional.of(docName + "'s nearest availability is on " + formatFriendlyDate(nearest.dateIso)
+                        + " at " + nearest.timeDisplay + ". Would that work, or do you prefer another date?");
+            }
+
+            // If user asked for a concrete date, list only that date's slots.
+            List<String> samples = buildSlotSamplesForDoctor(byDate, requestedDates);
             if (samples.isEmpty()) {
                 return Optional.of("No slots for that doctor on those dates. Want to try another date or doctor?");
             }
-            List<Doctor> doctors = appointmentService.getAllDoctors();
-            String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
             return Optional.of("Slots for " + docName + " — " + String.join("; ", samples) + ". Pick a time that works.");
         }
 
@@ -670,21 +708,61 @@ public class BookingFlowService {
         List<String> samples = new ArrayList<>();
         List<String> dateOrder = new ArrayList<>(byDate.keySet());
         Collections.sort(dateOrder);
+
+        // When user asked for a specific date, only return that date's slots.
         if (!requestedDates.isEmpty()) {
             for (String d : requestedDates) {
                 List<String> times = byDate.get(d);
-                if (times != null && !times.isEmpty())
+                if (times != null && !times.isEmpty()) {
                     samples.add(d + ": " + LlmService.formatSlotsAsRanges(times));
+                }
             }
+            return samples;
         }
+
+        // Fallback: limited number of upcoming dates (used rarely now that we prefer nearest-only).
         for (String date : dateOrder) {
             if (samples.size() >= MAX_SLOT_SAMPLES) break;
-            if (requestedDates.contains(date)) continue;
             List<String> times = byDate.get(date);
-            if (times != null && !times.isEmpty())
+            if (times != null && !times.isEmpty()) {
                 samples.add(date + ": " + LlmService.formatSlotsAsRanges(times));
+            }
         }
         return samples;
+    }
+
+    private static class NearestSlot {
+        final String dateIso;
+        final String timeDisplay;
+
+        NearestSlot(String dateIso, String timeDisplay) {
+            this.dateIso = dateIso;
+            this.timeDisplay = timeDisplay;
+        }
+    }
+
+    /** Find the earliest available slot (by date then time) for a doctor. */
+    private NearestSlot findNearestSlot(Map<String, List<String>> byDate) {
+        if (byDate == null || byDate.isEmpty()) return null;
+        List<String> dateOrder = new ArrayList<>(byDate.keySet());
+        Collections.sort(dateOrder);
+        for (String date : dateOrder) {
+            List<String> times = byDate.get(date);
+            if (times != null && !times.isEmpty()) {
+                // Slots in AppointmentService are already sorted by startTime; first entry is earliest.
+                return new NearestSlot(date, times.get(0));
+            }
+        }
+        return null;
+    }
+
+    private String formatFriendlyDate(String iso) {
+        try {
+            LocalDate d = LocalDate.parse(iso);
+            return d.format(DateTimeFormatter.ofPattern("MMMM d"));
+        } catch (Exception e) {
+            return iso;
+        }
     }
 
     private List<AppointmentService.AppointmentSummary> sortAppointmentsByNearest(List<AppointmentService.AppointmentSummary> list) {

@@ -58,12 +58,35 @@ public class PendingStateDto implements Serializable {
 	public boolean bookingLocked;
 	
 	public boolean bookingCompleted;
+
+	/**
+	 * True when the caller has explicitly asked to end the call
+	 * (e.g. said "bye", "end call", "stop"), and we have asked
+	 * them to confirm that they really want to hang up.
+	 */
+	public boolean pendingConfirmEndCall;
+
+	/**
+	 * Latched flag that the user has indicated they want to end
+	 * the conversation at some point (used so MediaStreamHandler
+	 * can safely hang up only after a friendly goodbye has been
+	 * spoken back to the user).
+	 */
+	public boolean userRequestedEnd;
+
+	/**
+	 * True when the user temporarily diverted from the main flow
+	 * (e.g. asked a general question like weather/doctor info)
+	 * and we should resume the previous booking/cancel/reschedule
+	 * flow once the interruption is handled.
+	 */
+	public boolean interruptionContext;
 	
     public boolean hasAnyPending() {
         return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
                 || pendingConfirmReschedule || pendingRescheduleDetails
-                || pendingChooseCancelAppointment || pendingChooseRescheduleAppointment
-                || pendingConfirmAbort;
+				|| pendingChooseCancelAppointment || pendingChooseRescheduleAppointment
+				|| pendingConfirmAbort || pendingConfirmEndCall;
     }
 
 }

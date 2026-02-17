@@ -1,6 +1,7 @@
 package com.ai.receptionist.websocket;
 
 import com.ai.receptionist.component.ConversationStore;
+import com.ai.receptionist.component.ResponsePhrases;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.service.BookingFlowService;
 import com.ai.receptionist.service.YesNoClassifierService;
@@ -46,6 +47,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final ConversationStore conversationStore;
     private final BookingFlowService bookingFlowService;
     private final YesNoClassifierService yesNoClassifier;
+    private final ResponsePhrases phrases;
 
     @Value("${openai.api-key:}")
     private String openAiApiKey;
@@ -59,7 +61,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             TwilioService twilioService,
             ConversationStore conversationStore,
             BookingFlowService bookingFlowService,
-            YesNoClassifierService yesNoClassifier
+            YesNoClassifierService yesNoClassifier,
+            ResponsePhrases phrases
     ) {
         this.sttService = sttService;
         this.llmService = llmService;
@@ -67,6 +70,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         this.conversationStore = conversationStore;
         this.bookingFlowService = bookingFlowService;
         this.yesNoClassifier = yesNoClassifier;
+        this.phrases = phrases;
     }
 
     static class StreamState {
@@ -74,6 +78,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         int silenceFrames = 0;
         boolean processing = false;
         boolean closed = false;
+        int silencePromptStage = 0;
         String callSid;
         String fromNumber;
     }
@@ -107,6 +112,12 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             }
             streams.put(streamSid, state);
             log.info("Call started | streamSid={} callSid={} from={}", streamSid, state.callSid, state.fromNumber);
+
+            // On reconnect, gently remind the caller that we're still here,
+            // but do not repeat the previous message or reset any state.
+            if (!conversationStore.getHistory(state.callSid).isEmpty()) {
+                twilioService.speakResponse(state.callSid, phrases.stillHere());
+            }
             return;
         }
 
@@ -136,6 +147,20 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             state.silenceFrames++;
         } else {
             state.silenceFrames = 0;
+            state.silencePromptStage = 0;
+        }
+
+        // Handle extended silence: never treat it as an immediate hangup.
+        // Instead, gently prompt the caller a couple of times.
+        if (!state.processing && state.buffer.size() < MIN_AUDIO_BYTES) {
+            if (state.silenceFrames >= SILENCE_FRAMES * 4 && state.silencePromptStage == 0) {
+                // ~a few seconds of silence
+                twilioService.speakResponse(state.callSid, phrases.stillThere());
+                state.silencePromptStage = 1;
+            } else if (state.silenceFrames >= SILENCE_FRAMES * 8 && state.silencePromptStage == 1) {
+                twilioService.speakResponse(state.callSid, "I'm still here. Would you like to keep going with your appointment?");
+                state.silencePromptStage = 2;
+            }
         }
 
         if (state.silenceFrames >= SILENCE_FRAMES && state.buffer.size() >= MIN_AUDIO_BYTES) {
@@ -156,7 +181,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         return (sum / frame.length) < 4;
     }
 
-    private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
+    private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending, boolean userRequestedEnd) {
         if (aiReply == null) return false;
         String ai = aiReply.toLowerCase().trim();
         String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
@@ -173,10 +198,13 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             }
         }
 
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")
-                || (user.contains("thank you") && (user.contains("bye") || user.contains("that's all")))
-                || (user.contains("bye") && user.length() <= 12)) {
-            return true;
+        // Only hang up when the caller has clearly asked to end the call
+        // AND we've actually spoken a goodbye-style response back.
+        if (userRequestedEnd && !hasPending) {
+            if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care")
+                    || ai.contains("thank you for calling") || ai.contains("bye")) {
+                return true;
+            }
         }
 
         return false;
@@ -215,9 +243,10 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, fromNumber, aiText);
 
-                boolean hasPending = bookingFlowService.getPending(callSid) != null
-                        && bookingFlowService.getPending(callSid).hasAnyPending();
-                boolean endCall = isConversationEnded(aiText, userText, hasPending);
+                com.ai.receptionist.dto.PendingStateDto pending = bookingFlowService.getPending(callSid);
+                boolean hasPending = pending != null && pending.hasAnyPending();
+                boolean userRequestedEnd = pending != null && pending.isUserRequestedEnd();
+                boolean endCall = isConversationEnded(aiText, userText, hasPending, userRequestedEnd);
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }
