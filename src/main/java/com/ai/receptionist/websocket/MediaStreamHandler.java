@@ -163,50 +163,40 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Handle cases where STT could not confidently extract user speech
-     * (pure silence, very short noise, or nonsensical content).
-     * We do NOT treat this as the user ending the call; instead we gently
-     * prompt them, then only after multiple missed turns we hang up.
+     * Handle silence or very short audio (no clear speech). Do NOT say "Sorry, I didn't catch that"
+     * for silence — only use that when the user spoke but in another language (handled in flow).
+     * Here: 1st and 2nd time say nothing (silent); 3rd "Are you still there?"; 4th+ goodbye.
      */
-    private void handleUnclearUtterance(StreamState state) {
-        if (state == null || state.closed) {
-            return;
-        }
+    private void handleSilentOrShortUtterance(StreamState state) {
+        if (state == null || state.closed) return;
         state.unclearUtterances++;
         String callSid = state.callSid;
-        if (callSid == null || callSid.isEmpty()) {
+        if (callSid == null || callSid.isEmpty()) return;
+
+        // 1st and 2nd: say nothing — avoids repeating "didn't catch that" on every reconnection
+        if (state.unclearUtterances <= 2) {
             return;
         }
 
         String prompt;
         boolean endCall = false;
-
-        // 1st time: simple "I didn't catch that" clarification
-        if (state.unclearUtterances == 1) {
-            prompt = phrases != null
-                    ? phrases.couldYouRepeat()
-                    : "Sorry, I didn't catch that. Could you repeat?";
-        }
-        // 2nd and 3rd time: "are you still there?" only (no "I'm still here" phrase)
-        else if (state.unclearUtterances <= 3) {
-            prompt = phrases != null
-                    ? phrases.stillThere()
-                    : "Are you still there?";
-        }
-        // 4th+ time: assume user has left, politely end
-        else {
-            prompt = phrases != null
-                    ? phrases.goodbye()
-                    : "Alright, have a good day! Bye.";
+        if (state.unclearUtterances == 3) {
+            prompt = phrases != null ? phrases.stillThere() : "Are you still there?";
+        } else {
+            prompt = phrases != null ? phrases.goodbye() : "Alright, have a good day! Bye.";
             endCall = true;
         }
 
         log.info("AI | {}", prompt);
         conversationStore.appendAssistant(callSid, state.fromNumber != null ? state.fromNumber : "", prompt);
         twilioService.speakResponse(callSid, prompt, endCall);
-        if (endCall) {
-            state.closed = true;
-        }
+        if (endCall) state.closed = true;
+    }
+
+    private boolean isBookingConfirmedMessage(String aiText) {
+        if (aiText == null || phrases == null) return false;
+        String confirmed = phrases.bookingConfirmed();
+        return confirmed != null && (aiText.trim().equals(confirmed.trim()) || aiText.contains("You're all set"));
     }
 
     private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
@@ -220,10 +210,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             return false;
         }
 
-        if ((user.equals("no") || user.equals("nope") || user.equals("nah")) && !hasPending) {
-            if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care") || ai.contains("bye")) {
-                return true;
-            }
+        // Whenever the assistant says goodbye, hang up (e.g. after user said "no", "peace", "god bless")
+        if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care") || ai.contains("bye")) {
+            return true;
         }
 
         if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")
@@ -249,16 +238,16 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 String userText = sttService.transcribe(audio);
                 if (StringUtils.isBlank(userText)) {
-                    handleUnclearUtterance(state);
+                    handleSilentOrShortUtterance(state);
                     return;
                 }
                 String trimmed = userText.trim();
                 if (trimmed.length() < 2) {
-                    handleUnclearUtterance(state);
+                    handleSilentOrShortUtterance(state);
                     return;
                 }
                 if (trimmed.length() < 5 && !yesNoClassifier.isShortAffirmativeOrNegative(trimmed)) {
-                    handleUnclearUtterance(state);
+                    handleSilentOrShortUtterance(state);
                     return;
                 }
 
@@ -283,7 +272,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 boolean hasPending = bookingFlowService.getPending(callSid) != null
                         && bookingFlowService.getPending(callSid).hasAnyPending();
-                boolean endCall = isConversationEnded(aiText, trimmed, hasPending);
+                boolean endCall = isConversationEnded(aiText, trimmed, hasPending)
+                        || isBookingConfirmedMessage(aiText);
                 if (endCall) {
                     log.info("Conversation ended -> will hang up after speaking");
                 }

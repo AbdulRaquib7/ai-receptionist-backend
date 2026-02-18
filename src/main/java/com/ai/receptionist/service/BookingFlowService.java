@@ -69,9 +69,10 @@ public class BookingFlowService {
             return Optional.of(phrases.goodbye());
         }
 
-        // Off-topic / general-knowledge questions: let LLM answer and resume flow
-        if (isGeneralKnowledgeQuestion(normalized)) {
-            return Optional.empty();
+        // After "anything else?" / "help you with?", farewell or "no" / "that's fine" -> goodbye (avoid "slot's taken" etc.)
+        if (isFarewellOrDeclineMoreHelp(normalized, conversationSummary)) {
+            clearPending(callSid);
+            return Optional.of(phrases.goodbye());
         }
 
         if (isListDoctorsRequest(normalized)) {
@@ -218,6 +219,11 @@ public class BookingFlowService {
         }
 
         ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
+
+        // General / off-topic questions: let LLM answer and resume flow (no hardcoded keyword list)
+        if (extracted.isGeneralQuestion) {
+            return Optional.empty();
+        }
 
         if (StringUtils.isNotBlank(extracted.time) && isLikelyPhoneNumber(extracted.time)) {
             extracted.time = null;
@@ -603,24 +609,22 @@ public class BookingFlowService {
     }
 
     /**
-     * Detect general-knowledge or off-topic questions that should be answered by the LLM
-     * (with full conversation context) and then resume appointment flow. Prevents booking
-     * logic from misclassifying e.g. "today's weather" as slot intent and returning wrong replies.
+     * True when the last assistant turn was offering more help ("anything else?", etc.)
+     * and the user is declining or saying goodbye (no, that's fine, peace, god bless, etc.).
+     * Ensures we return goodbye instead of misrouting to "slot's taken" or other flow.
      */
-    private boolean isGeneralKnowledgeQuestion(String normalized) {
-        if (normalized == null || normalized.length() < 4) return false;
-        String n = normalized.toLowerCase();
-        // Weather
-        if (n.contains("weather") || n.contains("temperature") || n.contains("rain") || n.contains("forecast")) return true;
-        // Time / date as general question (not slot choice)
-        if ((n.contains("what time") || n.contains("what is the time") || n.contains("current time")) && !n.contains("slot") && !n.contains("appointment")) return true;
-        // General knowledge / news
-        if (n.contains("prime minister") || n.contains("chief minister") || n.contains("president of") || n.contains("who is the")) return true;
-        if (n.contains("capital of") || n.contains("news") || (n.contains("today's date") && !n.contains("appointment"))) return true;
-        // Greeting / small talk
-        if (n.matches("^(how are you|how do you do|what('s| is) up)\\s*[?.!]*$") || n.equals("how are you")) return true;
-        // Clinic info that is not slot/booking
-        if ((n.contains("what time") && n.contains("close")) || (n.contains("opening hours") && !n.contains("slot"))) return true;
+    private boolean isFarewellOrDeclineMoreHelp(String normalized, List<String> conversationSummary) {
+        if (normalized == null || conversationSummary == null || conversationSummary.isEmpty()) return false;
+        String last = conversationSummary.get(conversationSummary.size() - 1).toLowerCase();
+        if (!last.contains("assistant:")) return false;
+        boolean assistantOfferedMore = last.contains("anything else") || last.contains("help you with")
+                || last.contains("can i help") || last.contains("anything else i can");
+        if (!assistantOfferedMore) return false;
+        String n = normalized.toLowerCase().replaceAll("[.!?]", "").trim();
+        if (n.equals("no") || n.equals("nope") || n.equals("nah") || n.equals("no thanks") || n.equals("no thank you")) return true;
+        if (n.equals("that's fine") || n.equals("thats fine") || n.equals("no that's fine") || n.equals("its fine")) return true;
+        if (n.contains("peace") || n.contains("god bless") || n.contains("have a good day") || n.contains("you too")) return true;
+        if (n.contains("nothing else") || n.contains("that's all")) return true;
         return false;
     }
 
@@ -1013,10 +1017,11 @@ public class BookingFlowService {
         String todayIso = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         String prompt = "Extract from conversation. Output JSON only. Today is " + todayIso + ".\n" +
                 "intent: book|cancel|reschedule|check_appointments|ask_availability|list_doctors|none\n" +
-                "check_appointments: 'do I have an appointment', 'appointment confirmed', 'is appointment confirmed', 'what are my appointments'.\n" +
+                "is_general_question: true if the user's message is clearly NOT about appointments — e.g. weather, who is X (PM/president), greetings, farewell, thanks, general knowledge, current time as general question. false if about booking, cancelling, rescheduling, slots, doctors, or appointments.\n" +
+                "check_appointments: 'do I have an appointment', 'appointment confirmed', 'what are my appointments'.\n" +
                 "ask_availability: 'what dates/times available', 'available slots' — NOT when user asks to list doctors.\n" +
-                "list_doctors: 'list doctor names', 'what doctors are available', 'doctor names', 'list doctors', 'what doctors do you have'.\n" +
-                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). If user names a doctor NOT in our list (e.g. Dr Charles), output that name as doctorKey so we can inform them. For ask_availability, if AI just recommended a doctor and user says 'yes/sure/check slots', extract that doctor's key from the AI message.\n" +
+                "list_doctors: 'list doctor names', 'what doctors are available', 'doctor names', 'list doctors'.\n" +
+                "doctorKey: Map user's doctor name to one of these keys from DB: [" + doctorList + "]. Use context to resolve variants (e.g. Allen/Alan, John/Jon). For ask_availability, if AI just recommended a doctor and user says 'yes/sure/check slots', extract that doctor's key from the AI message.\n" +
                 "date: YYYY-MM-DD. Use today=" + todayIso + ", tomorrow=" + LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE) + ". If AI offered slots for today/tomorrow and user accepts time, use that date.\n" +
                 "time: 12:00 PM, 12:30 PM, 01:00 PM etc. For '12 p.m.' use 12:00 PM. For '12pm' use 12:00 PM. For '6 to 7' use 06:00 PM.\n" +
                 "patientName, patientPhone: from user if given. For cancel/reschedule with multiple appointments, extract the name (e.g. 'cancel Selva's' -> patientName=Selva).\n" +
@@ -1037,6 +1042,7 @@ public class BookingFlowService {
             if (start >= 0) {
                 JsonNode j = mapper.readTree(content.substring(start));
                 out.intent = j.path("intent").asText("none");
+                out.isGeneralQuestion = j.path("is_general_question").asBoolean(false);
                 out.doctorKey = nullIfEmpty(j.path("doctorKey").asText(""));
                 out.date = nullIfEmpty(j.path("date").asText(""));
                 out.time = nullIfEmpty(j.path("time").asText(""));
@@ -1061,6 +1067,7 @@ public class BookingFlowService {
 
     static class ExtractedIntent {
         String intent;
+        boolean isGeneralQuestion;
         String doctorKey;
         String date;
         String time;
