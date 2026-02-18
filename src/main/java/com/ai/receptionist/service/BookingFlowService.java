@@ -65,7 +65,9 @@ public Optional<String> processUserMessage(
 
     PendingStateDto state = pendingByCall.get(callSid);
 
-    
+    /* =========================================================
+       ✅ END CALL / ABORT
+       ========================================================= */
 
     if (state != null && isAbortBookingRequest(normalized)) {
         clearPending(callSid);
@@ -77,7 +79,9 @@ public Optional<String> processUserMessage(
         return Optional.of(phrases.goodbye());
     }
 
-    
+    /* =========================================================
+       ✅ HANDLE YES/NO EVEN IF SHORT
+       ========================================================= */
 
     YesNoResult yesNo = yesNoClassifier.classify(userText);
 
@@ -93,7 +97,9 @@ public Optional<String> processUserMessage(
         }
     }
 
-    
+    /* =========================================================
+       ✅ HANDLE OTHER DATES REQUEST
+       ========================================================= */
 
     if (state != null
             && isOtherDatesRequest(normalized)
@@ -124,13 +130,17 @@ public Optional<String> processUserMessage(
                         ". Which works for you?");
     }
 
-    
+    /* =========================================================
+       ✅ PREVENT FOREIGN / UNCLEAR BREAK
+       ========================================================= */
 
     if (isLikelyForeignOrUnclearText(userText)) {
         return Optional.of(phrases.unclearAskAgain());
     }
 
-    
+    /* =========================================================
+       ✅ GENERAL QUESTION HANDLING
+       ========================================================= */
 
     ExtractedIntent extracted =
             extractIntent(userText, conversationSummary, openAiKey, openAiModel);
@@ -143,10 +153,12 @@ public Optional<String> processUserMessage(
                     "And about your appointment — shall we continue?");
         }
 
-        return Optional.empty(); 
+        return Optional.empty(); // let LLM answer
     }
 
-    
+    /* =========================================================
+       ✅ ASK AVAILABILITY (NEAREST FIRST)
+       ========================================================= */
 
     if ("ask_availability".equals(extracted.intent)) {
 
@@ -189,7 +201,9 @@ public Optional<String> processUserMessage(
         return Optional.of("No available slots found.");
     }
 
-    
+    /* =========================================================
+       ✅ CONFIRMATION AFTER DETAILS
+       ========================================================= */
 
     if (state != null && state.pendingNeedNamePhone) {
 
@@ -211,7 +225,9 @@ public Optional<String> processUserMessage(
         }
     }
 
-    
+    /* =========================================================
+       ✅ UNCLEAR INPUT DURING FLOW
+       ========================================================= */
 
     if (state != null && state.hasAnyPending()) {
         return Optional.of("Sorry, I didn’t catch that clearly. Could you repeat?");
@@ -321,7 +337,12 @@ public Optional<String> processUserMessage(
 	}
 
 
-	
+	/**
+	 * True when the last assistant turn was offering more help ("anything else?",
+	 * etc.) and the user is declining or saying goodbye (no, that's fine, peace,
+	 * god bless, etc.). Ensures we return goodbye instead of misrouting to "slot's
+	 * taken" or other flow.
+	 */
 	private boolean isFarewellOrDeclineMoreHelp(String normalized, List<String> conversationSummary) {
 		if (normalized == null || conversationSummary == null || conversationSummary.isEmpty())
 			return false;
@@ -391,9 +412,9 @@ public Optional<String> processUserMessage(
 		String k = lower.replace(".", "").replaceAll("\\s+", "");
 		List<Doctor> doctors = appointmentService.getAllDoctors();
 
-		
-		
-		
+		// Symptom / lay-term mapping to specializations, driven by DB values.
+		// This keeps behaviour data-driven: we only map to a doctor if a matching
+		// specialization actually exists in the database.
 		String targetSpecialization = null;
 		if (lower.contains("tooth") || lower.contains("teeth") || lower.contains("dental")) {
 			targetSpecialization = "dentist";
@@ -494,7 +515,10 @@ public Optional<String> processUserMessage(
 				|| normalized.contains("reschedule my nearest") || normalized.contains("reschedule nearest");
 	}
 
-	
+	/**
+	 * Normalize common STT/speech typos so intent is correct (e.g. "apartment" ->
+	 * "appointment").
+	 */
 	private String normalizeAppointmentTypo(String userText) {
 		if (userText == null || userText.isEmpty())
 			return userText;
@@ -574,17 +598,24 @@ public Optional<String> processUserMessage(
 				|| n.contains("chest pain");
 	}
 
-	
+	/**
+	 * Detect whether the user explicitly expressed a desire to cancel, using
+	 * plain-text keywords, independent of LLM extraction. This keeps cancel
+	 * behaviour grounded in what the caller actually said.
+	 */
 	private boolean containsExplicitCancelWord(String normalized) {
 		if (normalized == null || normalized.isBlank())
 			return false;
-		String n = normalized.replace("'", ""); 
+		String n = normalized.replace("'", ""); // handle "don't" / "dont"
 		return n.contains("cancel") || n.contains("cut appointment") || n.contains("cut the appointment")
 				|| n.contains("remove appointment") || n.contains("delete appointment")
 				|| n.contains("dont need appointment") || n.contains("don't need appointment");
 	}
 
-	
+	/**
+	 * Heuristic: input is mostly non-ASCII characters or has no Latin letters ->
+	 * likely foreign/unclear speech.
+	 */
 	private boolean isLikelyForeignOrUnclearText(String text) {
 		if (text == null || text.isBlank())
 			return false;
@@ -603,7 +634,11 @@ public Optional<String> processUserMessage(
 		return n.equals("thank you") || n.equals("thanks") || n.equals("thank you so much") || n.equals("thanks a lot");
 	}
 
-	
+	/**
+	 * Map short YES/NO answers to the last assistant question, when no
+	 * booking/cancel state is pending. Prevents "No"/"Nope" from accidentally being
+	 * treated as a CANCEL intent on an existing appointment.
+	 */
 	private Optional<String> handleShortYesNoWithoutPending(String callSid, YesNoResult yesNo,
 			List<String> conversationSummary) {
 		if (conversationSummary == null || conversationSummary.isEmpty()) {
@@ -625,8 +660,8 @@ public Optional<String> processUserMessage(
 				clearPending(callSid);
 				return Optional.of(phrases.goodbye());
 			}
-			
-			
+			// Generic "no" that isn't about ending the call – acknowledge but keep the call
+			// alive.
 			return Optional.of("No problem. How else can I help you?");
 		}
 
@@ -635,7 +670,7 @@ public Optional<String> processUserMessage(
 				clearPending(callSid);
 				return Optional.of(phrases.goodbye());
 			}
-			
+			// Generic "yes" – keep conversation open and nudge user.
 			return Optional.of("Sure. What would you like to do?");
 		}
 
@@ -747,7 +782,7 @@ public Optional<String> processUserMessage(
 		if (StringUtils.isBlank(openAiKey))
 			return out;
 
-		String url = "https:
+		String url = "https://api.openai.com/v1/chat/completions";
 		HttpHeaders headers = new HttpHeaders();
 		headers.setBearerAuth(openAiKey);
 		headers.setContentType(MediaType.APPLICATION_JSON);

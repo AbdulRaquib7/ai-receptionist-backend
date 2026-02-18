@@ -47,11 +47,11 @@ public class SttService {
         try {
             byte[] wavAudio = convertMulawToWav(mulawAudio);
 
-            String url = "https:
+            String url = "https://api.openai.com/v1/audio/transcriptions";
             
             log.info("🎧 WAV bytes={} (~{} ms)",
                     wavAudio.length,
-                    (wavAudio.length - 44) / 16); 
+                    (wavAudio.length - 44) / 16); // approx ms @ 8kHz PCM
 
             HttpHeaders headers = new HttpHeaders();
             headers.setBearerAuth(openAiApiKey);
@@ -83,7 +83,7 @@ public class SttService {
             return node.path("text").asText("").trim();
 
         } catch (HttpClientErrorException.Unauthorized e) {
-            log.error("OpenAI API returned 401 Unauthorized. Check that openai.api-key in application.properties (or OPENAI_API_KEY env) is set and valid. Keys: https:
+            log.error("OpenAI API returned 401 Unauthorized. Check that openai.api-key in application.properties (or OPENAI_API_KEY env) is set and valid. Keys: https://platform.openai.com/api-keys");
             return "";
         } catch (Exception ex) {
             log.error("Failed to transcribe audio", ex);
@@ -98,7 +98,7 @@ public class SttService {
                 8000f,
                 8,
                 1,
-                1,          
+                1,          // frame size = 1 byte
                 8000f,
                 false
         );
@@ -108,7 +108,7 @@ public class SttService {
                 8000f,
                 16,
                 1,
-                2,          
+                2,          // frame size = 2 bytes
                 8000f,
                 false
         );

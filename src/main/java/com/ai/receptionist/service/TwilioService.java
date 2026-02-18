@@ -18,7 +18,7 @@ import org.springframework.web.client.RestTemplate;
 public class TwilioService {
 
     private static final Logger log = LoggerFactory.getLogger(TwilioService.class);
-    private static final String TWILIO_API_BASE = "https:
+    private static final String TWILIO_API_BASE = "https://api.twilio.com/2010-04-01";
     private static final String SAY_PATH = "/twilio/voice/say";
 
     @Value("${twilio.accountSid:${twilio.account-sid:}}")
@@ -36,12 +36,16 @@ public class TwilioService {
         this.restTemplate = builder.build();
     }
 
-    
+    /**
+     * Speak response without ending call
+     */
     public void speakResponse(String callSid, String text) {
         speakResponse(callSid, text, false);
     }
 
-    
+    /**
+     * Speak response and optionally end call AFTER playback.
+     */
     public void speakResponse(String callSid, String text, boolean endCall) {
 
         if (callSid == null || text == null || text.isBlank()) {
@@ -84,7 +88,9 @@ public class TwilioService {
         }
     }
 
-    
+    /**
+     * Force hangup call immediately
+     */
     public void hangupCall(String callSid) {
         if (callSid == null || callSid.isBlank()) return;
 
@@ -116,7 +122,10 @@ public class TwilioService {
         }
     }
 
-    
+    /**
+     * Builds Twilio say URL.
+     * If endCall=true, TwiML will hang up AFTER speech finishes.
+     */
     private String buildSayUrl(String text, boolean endCall) {
 
         String encoded;
