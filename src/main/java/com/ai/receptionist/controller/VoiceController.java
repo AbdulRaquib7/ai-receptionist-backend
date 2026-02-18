@@ -102,15 +102,13 @@ public class VoiceController {
     }
 
     /**
-     * After AI speaks: re-connect stream only (no "I'm listening", no pause).
-     * Do NOT redirect to inbound (that would replay "Hello, how can I help you?").
+     * After AI speaks: re-connect stream only (silent — no spoken phrase).
+     * Do NOT redirect to inbound (that would replay the greeting).
      */
     private ResponseEntity<String> continueCallTwiMl() {
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" +
-                escapeXml(responsePhrases.stillHere()) + "</prosody></Say>";
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
-        String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
-        log.info("Continue call -> re-connect stream (\"I'm still here — please go ahead\")");
+        String twiml = "<Response>" + connectTwiml + "</Response>";
+        log.debug("Continue call -> re-connect stream");
         return ResponseEntity.ok(twiml);
     }
 

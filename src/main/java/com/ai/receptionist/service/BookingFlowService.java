@@ -69,6 +69,11 @@ public class BookingFlowService {
             return Optional.of(phrases.goodbye());
         }
 
+        // Off-topic / general-knowledge questions: let LLM answer and resume flow
+        if (isGeneralKnowledgeQuestion(normalized)) {
+            return Optional.empty();
+        }
+
         if (isListDoctorsRequest(normalized)) {
             return buildListDoctorsResponse();
         }
@@ -595,6 +600,28 @@ public class BookingFlowService {
                 || normalized.contains("goodbye") || normalized.contains("that's all") || normalized.contains("nothing else")
                 || (normalized.contains("thank you") && normalized.contains("bye"))
                 || (normalized.contains("bye") && normalized.length() <= 15);
+    }
+
+    /**
+     * Detect general-knowledge or off-topic questions that should be answered by the LLM
+     * (with full conversation context) and then resume appointment flow. Prevents booking
+     * logic from misclassifying e.g. "today's weather" as slot intent and returning wrong replies.
+     */
+    private boolean isGeneralKnowledgeQuestion(String normalized) {
+        if (normalized == null || normalized.length() < 4) return false;
+        String n = normalized.toLowerCase();
+        // Weather
+        if (n.contains("weather") || n.contains("temperature") || n.contains("rain") || n.contains("forecast")) return true;
+        // Time / date as general question (not slot choice)
+        if ((n.contains("what time") || n.contains("what is the time") || n.contains("current time")) && !n.contains("slot") && !n.contains("appointment")) return true;
+        // General knowledge / news
+        if (n.contains("prime minister") || n.contains("chief minister") || n.contains("president of") || n.contains("who is the")) return true;
+        if (n.contains("capital of") || n.contains("news") || (n.contains("today's date") && !n.contains("appointment"))) return true;
+        // Greeting / small talk
+        if (n.matches("^(how are you|how do you do|what('s| is) up)\\s*[?.!]*$") || n.equals("how are you")) return true;
+        // Clinic info that is not slot/booking
+        if ((n.contains("what time") && n.contains("close")) || (n.contains("opening hours") && !n.contains("slot"))) return true;
+        return false;
     }
 
     private boolean wantsToStartOver(String normalized) {

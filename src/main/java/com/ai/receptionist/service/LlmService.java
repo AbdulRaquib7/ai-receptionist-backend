@@ -134,7 +134,7 @@ public class LlmService {
         context.append("- UNCLEAR AUDIO: If user message is garbled, doesn't fit context, or sounds like a mishear, ask them to repeat. Never assume goodbye. Vary: \"Sorry, I didn't catch that. Could you repeat?\" or \"The line was a bit unclear. Could you say that again?\"\n");
         context.append("- SILENCE / SHORT UNCLEAR: If user says something very short or unclear (e.g. one word that doesn't fit), do NOT say goodbye or end the call. Say \"I'm sorry, I didn't catch that. Could you please repeat?\" or \"I'm still here. How can I help?\"\n");
         context.append("- END CALL: Only say goodbye (e.g. \"Thanks for calling. Have a great day!\") when the user CLEARLY says they are done: \"bye\", \"goodbye\", \"thank you bye\", \"that's all\", \"nothing else\". Do not end on unclear or short input.\n");
-        context.append("- GENERAL QUESTIONS: Always answer reasonable general questions (e.g. \"what's the weather\", \"how are you\", \"who is the Indian president\") using your general knowledge, then smoothly return to appointment flow.\n");
+        context.append("- GENERAL QUESTIONS: Always answer reasonable general questions (e.g. weather, \"who is the PM\", \"how are you\") in 1–2 short sentences. Then immediately return to the appointment flow using the conversation context (e.g. \"Now, about your appointment…\", \"Where were we? You were booking with Dr X…\"). Never refuse or give a booking-only reply (e.g. \"that slot's taken\") to a clear general question.\n");
 
         List<Map<String, String>> messages = new ArrayList<>();
         Map<String, String> systemMsg = new HashMap<>();

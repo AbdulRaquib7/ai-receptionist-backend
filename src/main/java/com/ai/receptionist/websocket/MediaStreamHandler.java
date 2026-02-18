@@ -187,14 +187,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                     ? phrases.couldYouRepeat()
                     : "Sorry, I didn't catch that. Could you repeat?";
         }
-        // 2nd time: reassure we're still on the line
-        else if (state.unclearUtterances == 2) {
-            prompt = phrases != null
-                    ? phrases.stillHere()
-                    : "Hello? I'm here. Please go ahead.";
-        }
-        // 3rd time: explicit "are you still there?"
-        else if (state.unclearUtterances == 3) {
+        // 2nd and 3rd time: "are you still there?" only (no "I'm still here" phrase)
+        else if (state.unclearUtterances <= 3) {
             prompt = phrases != null
                     ? phrases.stillThere()
                     : "Are you still there?";
