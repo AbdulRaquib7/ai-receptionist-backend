@@ -288,10 +288,19 @@ public class BookingFlowService {
             stateForBook.doctorKey = resolvedDoctorKey;
             List<String> requestedDates = getRequestedDatesFromUserMessage(normalized);
             List<Doctor> doctors = appointmentService.getAllDoctors();
-            String docName = doctors.stream().filter(d -> d.getKey().equals(resolvedDoctorKey)).findFirst().map(Doctor::getName).orElse(resolvedDoctorKey);
+            Doctor doc = doctors.stream()
+                    .filter(d -> d.getKey().equals(resolvedDoctorKey))
+                    .findFirst()
+                    .orElse(null);
+            String docName = doc != null ? doc.getName() : resolvedDoctorKey;
             String nearest = buildNearestSlotSentence(docName, slots.get(resolvedDoctorKey), requestedDates);
             if (nearest == null) {
                 return Optional.of("No slots for that doctor on those dates. Want to try another date or doctor?");
+            }
+            // When we know the concrete doctor, briefly introduce them and then give the nearest slot.
+            if (doc != null) {
+                String spec = doctorSpecializationPhrase(doc);
+                return Optional.of(doc.getName() + " is our " + spec + nearest);
             }
             return Optional.of(nearest);
         }
@@ -751,9 +760,23 @@ public class BookingFlowService {
         List<String> out = new ArrayList<>();
         String tomorrow = LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE);
         String dayAfter = LocalDate.now().plusDays(2).format(DateTimeFormatter.ISO_LOCAL_DATE);
-        boolean wantOtherDates = normalized.contains("other dates") || normalized.contains("any other dates") || normalized.contains("other date");
-        if (normalized.contains("tomorrow") || wantOtherDates) out.add(tomorrow);
-        if (normalized.contains("day after") || normalized.contains("day after tomorrow") || wantOtherDates) out.add(dayAfter);
+
+        boolean wantOtherDates = normalized.contains("other dates")
+                || normalized.contains("any other dates")
+                || normalized.contains("other date");
+
+        // If caller explicitly says "day after tomorrow", prefer ONLY that date.
+        if (normalized.contains("day after tomorrow")) {
+            out.add(dayAfter);
+            return out;
+        }
+
+        if (normalized.contains("tomorrow") || wantOtherDates) {
+            out.add(tomorrow);
+        }
+        if (normalized.contains("day after") || wantOtherDates) {
+            out.add(dayAfter);
+        }
         return out;
     }
 

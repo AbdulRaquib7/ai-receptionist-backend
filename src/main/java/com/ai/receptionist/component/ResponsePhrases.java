@@ -18,7 +18,7 @@ public class ResponsePhrases {
     }
 
     public String bookingConfirmed() {
-        return "Awesome! You're all set. You'll get a reminder too. Thanks for calling, have a great day!";
+        return "Awesome! You're all set. You'll get a reminder too. Can I help you with anything else?";
     }
 
     public String slotUnavailable() {
