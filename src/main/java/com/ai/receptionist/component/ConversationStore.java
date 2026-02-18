@@ -62,4 +62,24 @@ public class ConversationStore {
     public void clear(String callSid) {
         conversations.remove(callSid);
     }
+    
+    public List<String> getConversationSummary(String callSid) {
+
+        List<ChatMessage> history = getHistory(callSid);
+        if (history == null || history.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> summary = new ArrayList<>();
+
+        int start = Math.max(0, history.size() - 6);
+
+        for (int i = start; i < history.size(); i++) {
+            ChatMessage m = history.get(i);
+            summary.add(m.getRole() + ": " + m.getContent());
+        }
+
+        return summary;
+    }
+
 }

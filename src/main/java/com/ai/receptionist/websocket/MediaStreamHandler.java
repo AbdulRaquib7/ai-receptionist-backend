@@ -24,12 +24,12 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
     private static final int SILENCE_FRAMES = 20;
-
-    // 🔥 increased to avoid noise bursts triggering STT
     private static final int MIN_AUDIO_BYTES = 16000;
 
     private final ObjectMapper mapper = new ObjectMapper();
+
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
+    private final Set<String> activeStreams = ConcurrentHashMap.newKeySet();
     private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
@@ -73,7 +73,6 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String callSid;
         String fromNumber;
 
-        // ✅ reconnect protection
         long connectedAt;
         boolean justReconnected = true;
     }
@@ -86,6 +85,12 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String streamSid = root.path("streamSid").asText();
 
         if ("start".equals(event)) {
+
+            if (!activeStreams.add(streamSid)) {
+                log.debug("Duplicate stream ignored: {}", streamSid);
+                return;
+            }
+
             StreamState state = new StreamState();
             state.connectedAt = System.currentTimeMillis();
 
@@ -125,7 +130,6 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         StreamState state = streams.get(streamSid);
         if (state == null || state.closed || state.processing) return;
 
-        // ✅ ignore corrupted audio immediately after reconnect
         if (state.justReconnected &&
                 System.currentTimeMillis() - state.connectedAt < 400) {
             return;
@@ -153,7 +157,6 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         }
     }
 
-    // ✅ stronger silence detection to avoid noise bursts
     private boolean isSilent(byte[] frame) {
         long sum = 0;
         for (byte b : frame) sum += Math.abs(b);
@@ -179,23 +182,23 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 String trimmed = userText.trim().toLowerCase();
 
-                // ✅ ignore single short noise words
-                if (trimmed.split("\\s+").length == 1 && trimmed.length() <= 4) {
+                // 🔥 ignore noise but allow confirmations
+                if (isNoiseWord(trimmed) && !isCriticalConfirmation(trimmed)) {
                     log.info("Ignoring probable noise word: {}", trimmed);
                     return;
                 }
 
-                // reset unclear counter
                 state.unclearUtterances = 0;
 
                 log.info("USER | {}", trimmed);
                 conversationStore.appendUser(callSid, from, trimmed);
 
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
+                List<String> summary = conversationStore.getConversationSummary(callSid);
 
                 Optional<String> flowReply =
                         bookingFlowService.processUserMessage(
-                                callSid, from, trimmed, null, openAiApiKey, openAiModel);
+                                callSid, from, trimmed, summary, openAiApiKey, openAiModel);
 
                 String aiText = flowReply.orElseGet(() ->
                         llmService.generateReply(callSid, from, history));
@@ -205,11 +208,17 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, from, aiText);
 
-                boolean endCall = isGoodbye(trimmed, aiText);
+                boolean endCall =
+                        isGoodbye(trimmed, aiText)
+                                || aiText.toLowerCase().contains("appointment is confirmed")
+                                || aiText.toLowerCase().contains("you're all set");
 
                 twilioService.speakResponse(callSid, aiText, endCall);
 
-                if (endCall) state.closed = true;
+                if (endCall) {
+                    Thread.sleep(1200); // allow audio playback
+                    state.closed = true;
+                }
 
             } catch (Exception e) {
                 log.error("Pipeline error", e);
@@ -217,6 +226,18 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 state.processing = false;
             }
         });
+    }
+
+    private boolean isNoiseWord(String text) {
+        return text.split("\\s+").length == 1 && text.length() <= 4;
+    }
+
+    private boolean isCriticalConfirmation(String text) {
+        String t = text.trim().toLowerCase();
+        return t.equals("yes") || t.equals("yeah") || t.equals("yep")
+                || t.equals("confirm") || t.equals("correct")
+                || t.equals("right") || t.equals("no")
+                || t.equals("nope") || t.equals("cancel");
     }
 
     private void handleSilence(StreamState state) {
@@ -239,23 +260,21 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         twilioService.speakResponse(callSid, prompt, end);
     }
 
-    // ✅ safer goodbye detection
     private boolean isGoodbye(String user, String ai) {
+        String u = user.toLowerCase();
+        String a = ai.toLowerCase();
 
-        if (user.contains("bye") || user.contains("goodbye")) {
+        if (u.equals("bye") || u.equals("goodbye") || u.equals("thanks bye"))
             return true;
-        }
 
-        if (ai.toLowerCase().contains("have a good day")
-                || ai.toLowerCase().contains("goodbye")) {
-            return true;
-        }
-
-        return false;
+        return a.contains("take care")
+                || a.contains("have a great day")
+                || a.contains("goodbye");
     }
 
     private void cleanup(String streamSid) {
         StreamState state = streams.remove(streamSid);
+        activeStreams.remove(streamSid);
         if (state != null) state.closed = true;
     }
 }

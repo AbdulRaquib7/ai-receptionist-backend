@@ -11,5 +11,6 @@ public enum ConversationState {
     CANCEL_APPOINTMENT,
     GENERAL_QUESTION,
     CONFIRM_ABORT,
+    COMPLETED,
     END
 }
