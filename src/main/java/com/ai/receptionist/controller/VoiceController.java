@@ -23,7 +23,7 @@ public class VoiceController {
 
     private static final String VOICE = "Polly.Joanna-Neural";
 
-    @Value("${twilio.media-stream-url:wss://localhost:8080/media-stream}")
+    @Value("${twilio.media-stream-url:wss:
     private String mediaStreamUrl;
 
     @Value("${twilio.base-url:}")
@@ -69,7 +69,7 @@ public class VoiceController {
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
         String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(text) + "</prosody></Say>";
         if (endCall) {
-            // Hang up immediately after speaking - no redirect, more reliable
+            
             String twiml = "<Response>" + sayTwiml + "<Hangup/></Response>";
             log.info("Conversation ended -> hanging up call");
             return ResponseEntity.ok(twiml);
@@ -101,10 +101,7 @@ public class VoiceController {
         return continueCallTwiMl();
     }
 
-    /**
-     * After AI speaks: re-connect stream only (silent — no spoken phrase).
-     * Do NOT redirect to inbound (that would replay the greeting).
-     */
+    
     private ResponseEntity<String> continueCallTwiMl() {
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + connectTwiml + "</Response>";

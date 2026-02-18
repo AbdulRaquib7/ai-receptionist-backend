@@ -50,7 +50,7 @@ public class LlmService {
             return "";
         }
 
-        String url = "https://api.openai.com/v1/chat/completions";
+        String url = "https:
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(openAiApiKey);

@@ -182,7 +182,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 String trimmed = userText.trim().toLowerCase();
 
-                // 🔥 ignore noise but allow confirmations
+                
                 if (isNoiseWord(trimmed) && !isCriticalConfirmation(trimmed)) {
                     log.info("Ignoring probable noise word: {}", trimmed);
                     return;
@@ -216,7 +216,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 twilioService.speakResponse(callSid, aiText, endCall);
 
                 if (endCall) {
-                    Thread.sleep(1200); // allow audio playback
+                    Thread.sleep(1200); 
                     state.closed = true;
                 }
 
@@ -248,7 +248,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String t = text
                 .trim()
                 .toLowerCase()
-                .replaceAll("[^a-z]", ""); // remove punctuation
+                .replaceAll("[^a-z]", ""); 
 
         return t.equals("yes")
                 || t.equals("yeah")
