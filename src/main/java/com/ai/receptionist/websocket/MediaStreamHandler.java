@@ -3,30 +3,20 @@ package com.ai.receptionist.websocket;
 import com.ai.receptionist.component.ConversationStore;
 import com.ai.receptionist.component.ResponsePhrases;
 import com.ai.receptionist.entity.ChatMessage;
-import com.ai.receptionist.service.BookingFlowService;
-import com.ai.receptionist.service.YesNoClassifierService;
-import com.ai.receptionist.service.LlmService;
-import com.ai.receptionist.service.SttService;
-import com.ai.receptionist.service.TwilioService;
+import com.ai.receptionist.service.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.TextMessage;
-import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
-
 import org.springframework.beans.factory.annotation.Value;
 
 import java.io.ByteArrayOutputStream;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
+import java.util.concurrent.*;
 
 @Component
 public class MediaStreamHandler extends TextWebSocketHandler {
@@ -34,11 +24,12 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
     private static final int SILENCE_FRAMES = 20;
-    private static final int MIN_AUDIO_BYTES = 12000;
+
+    // 🔥 increased to avoid noise bursts triggering STT
+    private static final int MIN_AUDIO_BYTES = 16000;
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
-    /** Persists From number across stream reconnects (continue-call does not pass custom params) */
     private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
@@ -78,10 +69,13 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         int silenceFrames = 0;
         boolean processing = false;
         boolean closed = false;
-        /** Counts consecutive unclear/silent utterances to drive gentle timeout prompts. */
         int unclearUtterances = 0;
         String callSid;
         String fromNumber;
+
+        // ✅ reconnect protection
+        long connectedAt;
+        boolean justReconnected = true;
     }
 
     @Override
@@ -93,56 +87,59 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
         if ("start".equals(event)) {
             StreamState state = new StreamState();
+            state.connectedAt = System.currentTimeMillis();
+
             JsonNode start = root.path("start");
-            if (!start.isMissingNode()) {
-                state.callSid = start.path("callSid").asText("");
-                JsonNode custom = start.path("customParameters");
-                if (!custom.isMissingNode()) {
-                    String from = custom.path("From").asText("");
-                    if (!from.isEmpty()) {
-                        state.fromNumber = from;
-                        callSidToFrom.put(state.callSid, from);
-                    }
+            state.callSid = start.path("callSid").asText("");
+
+            JsonNode custom = start.path("customParameters");
+            if (!custom.isMissingNode()) {
+                String from = custom.path("From").asText("");
+                if (!from.isEmpty()) {
+                    state.fromNumber = from;
+                    callSidToFrom.put(state.callSid, from);
                 }
             }
-            if (state.callSid == null || state.callSid.isEmpty()) {
-                state.callSid = root.path("callSid").asText("");
-            }
+
             if (state.fromNumber == null) {
                 state.fromNumber = callSidToFrom.get(state.callSid);
             }
+
             streams.put(streamSid, state);
-            log.info("Call started | streamSid={} callSid={} from={}", streamSid, state.callSid, state.fromNumber);
+            log.info("Call started | streamSid={} callSid={}", streamSid, state.callSid);
             return;
         }
 
         if ("media".equals(event)) {
-            handleMedia(streamSid, root, session);
+            handleMedia(streamSid, root);
             return;
         }
 
         if ("stop".equals(event)) {
-            log.info("Call/stream ended | {}", streamSid);
             cleanup(streamSid);
         }
     }
 
-    private void handleMedia(String streamSid, JsonNode root, WebSocketSession session) {
+    private void handleMedia(String streamSid, JsonNode root) {
 
         StreamState state = streams.get(streamSid);
         if (state == null || state.closed || state.processing) return;
 
+        // ✅ ignore corrupted audio immediately after reconnect
+        if (state.justReconnected &&
+                System.currentTimeMillis() - state.connectedAt < 400) {
+            return;
+        }
+        state.justReconnected = false;
+
         String payload = root.path("media").path("payload").asText(null);
-        if (StringUtils.isBlank(payload)) return;
+        if (payload == null) return;
 
         byte[] frame = Base64.getDecoder().decode(payload);
         state.buffer.write(frame, 0, frame.length);
 
-        if (isSilent(frame)) {
-            state.silenceFrames++;
-        } else {
-            state.silenceFrames = 0;
-        }
+        if (isSilent(frame)) state.silenceFrames++;
+        else state.silenceFrames = 0;
 
         if (state.silenceFrames >= SILENCE_FRAMES && state.buffer.size() >= MIN_AUDIO_BYTES) {
 
@@ -156,128 +153,63 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         }
     }
 
+    // ✅ stronger silence detection to avoid noise bursts
     private boolean isSilent(byte[] frame) {
         long sum = 0;
         for (byte b : frame) sum += Math.abs(b);
-        return (sum / frame.length) < 4;
-    }
-
-    /**
-     * Handle silence or very short audio (no clear speech). Do NOT say "Sorry, I didn't catch that"
-     * for silence — only use that when the user spoke but in another language (handled in flow).
-     * Here: 1st and 2nd time say nothing (silent); 3rd "Are you still there?"; 4th+ goodbye.
-     */
-    private void handleSilentOrShortUtterance(StreamState state) {
-        if (state == null || state.closed) return;
-        state.unclearUtterances++;
-        String callSid = state.callSid;
-        if (callSid == null || callSid.isEmpty()) return;
-
-        // 1st and 2nd: say nothing — avoids repeating "didn't catch that" on every reconnection
-        if (state.unclearUtterances <= 2) {
-            return;
-        }
-
-        String prompt;
-        boolean endCall = false;
-        if (state.unclearUtterances == 3) {
-            prompt = phrases != null ? phrases.stillThere() : "Are you still there?";
-        } else {
-            prompt = phrases != null ? phrases.goodbye() : "Alright, have a good day! Bye.";
-            endCall = true;
-        }
-
-        log.info("AI | {}", prompt);
-        conversationStore.appendAssistant(callSid, state.fromNumber != null ? state.fromNumber : "", prompt);
-        twilioService.speakResponse(callSid, prompt, endCall);
-        if (endCall) state.closed = true;
-    }
-
-    private boolean isBookingConfirmedMessage(String aiText) {
-        if (aiText == null || phrases == null) return false;
-        String confirmed = phrases.bookingConfirmed();
-        return confirmed != null && (aiText.trim().equals(confirmed.trim()) || aiText.contains("You're all set"));
-    }
-
-    private boolean isConversationEnded(String aiReply, String userMessage, boolean hasPending) {
-        if (aiReply == null) return false;
-        String ai = aiReply.toLowerCase().trim();
-        String user = userMessage != null ? userMessage.toLowerCase().trim() : "";
-
-        if (ai.contains("anything else i can help") || ai.contains("anything else") && ai.contains("help")
-                || ai.contains("can i help you with") || ai.contains("help you with anything")
-                || ai.contains("what can i help") || ai.contains("would you like me to confirm")) {
-            return false;
-        }
-
-        // Whenever the assistant says goodbye, hang up (e.g. after user said "no", "peace", "god bless")
-        if (ai.contains("good day") || ai.contains("goodbye") || ai.contains("take care") || ai.contains("bye")) {
-            return true;
-        }
-
-        if (user.contains("goodbye") || user.contains("that's all") || user.contains("nothing else")
-                || (user.contains("thank you") && (user.contains("bye") || user.contains("that's all")))
-                || (user.contains("bye") && user.length() <= 12)) {
-            return true;
-        }
-
-        return false;
+        return (sum / frame.length) < 6;
     }
 
     private void processUtteranceAsync(String streamSid, byte[] audio, StreamState state) {
+
         CompletableFuture.runAsync(() -> {
             try {
 
                 if (audio.length < MIN_AUDIO_BYTES || state.closed) return;
 
                 String callSid = state.callSid;
-                if (callSid == null || callSid.isEmpty()) {
-                    log.warn("No callSid for stream {}; cannot speak response", streamSid);
-                    return;
-                }
+                String from = state.fromNumber == null ? "" : state.fromNumber;
 
                 String userText = sttService.transcribe(audio);
+
                 if (StringUtils.isBlank(userText)) {
-                    handleSilentOrShortUtterance(state);
-                    return;
-                }
-                String trimmed = userText.trim();
-                if (trimmed.length() < 2) {
-                    handleSilentOrShortUtterance(state);
-                    return;
-                }
-                if (trimmed.length() < 5 && !yesNoClassifier.isShortAffirmativeOrNegative(trimmed)) {
-                    handleSilentOrShortUtterance(state);
+                    handleSilence(state);
                     return;
                 }
 
-                // We have a proper utterance; reset unclear counter.
+                String trimmed = userText.trim().toLowerCase();
+
+                // ✅ ignore single short noise words
+                if (trimmed.split("\\s+").length == 1 && trimmed.length() <= 4) {
+                    log.info("Ignoring probable noise word: {}", trimmed);
+                    return;
+                }
+
+                // reset unclear counter
                 state.unclearUtterances = 0;
 
-                String fromNumber = state.fromNumber != null ? state.fromNumber : "";
                 log.info("USER | {}", trimmed);
-                conversationStore.appendUser(callSid, fromNumber, trimmed);
-                List<ChatMessage> history = conversationStore.getHistory(callSid);
-                List<String> summary = history.stream()
-                        .map(m -> m.getRole() + ": " + m.getContent())
-                        .collect(java.util.stream.Collectors.toList());
+                conversationStore.appendUser(callSid, from, trimmed);
 
-                Optional<String> flowReply = bookingFlowService.processUserMessage(
-                        callSid, fromNumber, trimmed, summary, openAiApiKey, openAiModel);
-                String aiText = flowReply.orElseGet(() -> llmService.generateReply(callSid, fromNumber, history));
+                List<ChatMessage> history = conversationStore.getHistory(callSid);
+
+                Optional<String> flowReply =
+                        bookingFlowService.processUserMessage(
+                                callSid, from, trimmed, null, openAiApiKey, openAiModel);
+
+                String aiText = flowReply.orElseGet(() ->
+                        llmService.generateReply(callSid, from, history));
+
                 if (StringUtils.isBlank(aiText)) return;
 
                 log.info("AI | {}", aiText);
-                conversationStore.appendAssistant(callSid, fromNumber, aiText);
+                conversationStore.appendAssistant(callSid, from, aiText);
 
-                boolean hasPending = bookingFlowService.getPending(callSid) != null
-                        && bookingFlowService.getPending(callSid).hasAnyPending();
-                boolean endCall = isConversationEnded(aiText, trimmed, hasPending)
-                        || isBookingConfirmedMessage(aiText);
-                if (endCall) {
-                    log.info("Conversation ended -> will hang up after speaking");
-                }
+                boolean endCall = isGoodbye(trimmed, aiText);
+
                 twilioService.speakResponse(callSid, aiText, endCall);
+
+                if (endCall) state.closed = true;
 
             } catch (Exception e) {
                 log.error("Pipeline error", e);
@@ -287,10 +219,43 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         });
     }
 
+    private void handleSilence(StreamState state) {
+        state.unclearUtterances++;
+
+        if (state.unclearUtterances <= 2) return;
+
+        String callSid = state.callSid;
+        String prompt;
+        boolean end = false;
+
+        if (state.unclearUtterances == 3) {
+            prompt = phrases.stillThere();
+        } else {
+            prompt = phrases.goodbye();
+            end = true;
+        }
+
+        conversationStore.appendAssistant(callSid, state.fromNumber, prompt);
+        twilioService.speakResponse(callSid, prompt, end);
+    }
+
+    // ✅ safer goodbye detection
+    private boolean isGoodbye(String user, String ai) {
+
+        if (user.contains("bye") || user.contains("goodbye")) {
+            return true;
+        }
+
+        if (ai.toLowerCase().contains("have a good day")
+                || ai.toLowerCase().contains("goodbye")) {
+            return true;
+        }
+
+        return false;
+    }
+
     private void cleanup(String streamSid) {
         StreamState state = streams.remove(streamSid);
-        if (state != null) {
-            state.closed = true;
-        }
+        if (state != null) state.closed = true;
     }
 }
