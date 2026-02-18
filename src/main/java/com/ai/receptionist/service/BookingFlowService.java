@@ -49,7 +49,7 @@ public class BookingFlowService {
 		this.intentPriorityResolver = intentPriorityResolver;
 	}
 
-	public Optional<String> processUserMessage(
+public Optional<String> processUserMessage(
         String callSid,
         String fromNumber,
         String userText,
@@ -65,165 +65,108 @@ public class BookingFlowService {
 
     PendingStateDto state = pendingByCall.get(callSid);
 
-    // ✅ abort booking anytime
+    /* =========================================================
+       ✅ END CALL / ABORT
+       ========================================================= */
+
     if (state != null && isAbortBookingRequest(normalized)) {
         clearPending(callSid);
-        return Optional.of("No problem. I've stopped the booking process. Let me know if you'd like to start again.");
+        return Optional.of("No problem. I've stopped the booking. Let me know if you'd like to start again.");
     }
 
-    // ✅ end call detection (reliable)
     if (wantsToEndCall(normalized)) {
         clearPending(callSid);
         return Optional.of(phrases.goodbye());
     }
 
-    // ✅ prevent foreign/garbled speech from breaking flow
+    /* =========================================================
+       ✅ HANDLE YES/NO EVEN IF SHORT
+       ========================================================= */
+
+    YesNoResult yesNo = yesNoClassifier.classify(userText);
+
+    if (state != null && state.pendingConfirmBook) {
+
+        if (yesNo == YesNoResult.YES) {
+            return confirmBook(callSid, fromNumber, state);
+        }
+
+        if (yesNo == YesNoResult.NO) {
+            state.pendingConfirmBook = false;
+            return Optional.of("Okay, no problem. Would you like a different time?");
+        }
+    }
+
+    /* =========================================================
+       ✅ HANDLE OTHER DATES REQUEST
+       ========================================================= */
+
+    if (state != null
+            && isOtherDatesRequest(normalized)
+            && state.lastSuggestedDoctorKey != null) {
+
+        Map<String, Map<String, List<String>>> slots =
+                appointmentService.getAvailableSlotsForNextWeek();
+
+        Map<String, List<String>> byDate =
+                slots.get(state.lastSuggestedDoctorKey);
+
+        if (byDate == null || byDate.isEmpty())
+            return Optional.of("No other dates available.");
+
+        List<String> dates = new ArrayList<>(byDate.keySet());
+        dates.sort(Comparator.comparing(LocalDate::parse));
+
+        if (state.lastSuggestedDate != null) {
+            dates.remove(state.lastSuggestedDate);
+        }
+
+        if (dates.isEmpty())
+            return Optional.of("That's the only available date.");
+
+        return Optional.of(
+                "Sure — we also have " +
+                        String.join(" and ", dates) +
+                        ". Which works for you?");
+    }
+
+    /* =========================================================
+       ✅ PREVENT FOREIGN / UNCLEAR BREAK
+       ========================================================= */
+
     if (isLikelyForeignOrUnclearText(userText)) {
         return Optional.of(phrases.unclearAskAgain());
     }
 
-    // ✅ booking already completed
-    if (state != null && state.bookingCompleted) {
-        if (yesNoClassifier.isAffirmative(userText) || wantsToEndCall(normalized)) {
-            clearPending(callSid);
-            return Optional.of(phrases.goodbye());
-        }
-        return Optional.of("Your appointment is confirmed. Anything else I can help you with?");
-    }
+    /* =========================================================
+       ✅ GENERAL QUESTION HANDLING
+       ========================================================= */
 
-    // ✅ farewell after "anything else?"
-    if (isFarewellOrDeclineMoreHelp(normalized, conversationSummary)) {
-        clearPending(callSid);
-        return Optional.of(phrases.goodbye());
-    }
-
-    // ✅ detect intent
     ExtractedIntent extracted =
             extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
-    /*
-     * =========================================================
-     * ✅ GENERAL QUESTIONS SAFE HANDLING
-     * =========================================================
-     */
-
     if (extracted.isGeneralQuestion) {
 
-        // if mid flow → answer but resume
         if (state != null && state.hasAnyPending()) {
             return Optional.of(
                     "Sure. " +
-                    "I can help with that. " +
                     "And about your appointment — shall we continue?");
         }
 
-        // let LLM answer
-        return Optional.empty();
+        return Optional.empty(); // let LLM answer
     }
 
-    /*
-     * =========================================================
-     * ✅ CONFIRMATION INTERRUPTION PROTECTION
-     * =========================================================
-     */
+    /* =========================================================
+       ✅ ASK AVAILABILITY (NEAREST FIRST)
+       ========================================================= */
 
-    if (state != null && state.pendingConfirmBook
-            && !state.bookingLocked
-            && !state.bookingCompleted) {
-
-        if (!yesNoClassifier.isAffirmative(userText)
-                && !yesNoClassifier.isNegative(userText)
-                && intentClassifier.classify(userText, false)
-                != ConversationIntent.CONFIRM_YES) {
-
-            return buildDoctorInfoThenConfirmPrompt(state)
-                    .or(() -> Optional.of("Would you like me to confirm the appointment now?"));
-        }
-
-        if (yesNoClassifier.isAffirmative(userText)) {
-            return confirmBook(callSid, fromNumber, state);
-        }
-    }
-
-    /*
-     * =========================================================
-     * ✅ RESCHEDULE FLOW STABILITY
-     * =========================================================
-     */
-
-    if (state != null && state.pendingRescheduleDetails) {
-
-        // allow doctor info interruption
-        if (intentClassifier.classify(userText, false)
-                == ConversationIntent.ASK_DOCTOR_INFO) {
-            return Optional.empty();
-        }
-
-        Optional<AppointmentService.AppointmentSummary> existingSummary =
-                appointmentService.getUpcomingAppointmentSummary(
-                        fromNumber, state.reschedulePatientName);
-
-        if (existingSummary.isEmpty()) {
-            state.pendingRescheduleDetails = false;
-            return Optional.of("You don't have any appointment to reschedule.");
-        }
-
-        AppointmentService.AppointmentSummary current = existingSummary.get();
-
-        final String resolvedDoctorKey =
-                appointmentService.getAllDoctors().stream()
-                        .filter(d -> d.getName().equals(current.doctorName))
-                        .findFirst()
-                        .map(Doctor::getKey)
-                        .orElse(null);
-
-        String date = StringUtils.isNotBlank(extracted.date)
-                ? normalizeDate(extracted.date) : null;
-
-        String time = StringUtils.isNotBlank(extracted.time)
-                ? normalizeTimeForSlot(extracted.time) : null;
-
-        if (resolvedDoctorKey != null && date != null && time != null) {
-
-            Map<String, Map<String, List<String>>> slots =
-                    appointmentService.getAvailableSlotsForNextWeek();
-
-            List<String> byDate =
-                    slots.containsKey(resolvedDoctorKey)
-                            ? slots.get(resolvedDoctorKey).get(date)
-                            : null;
-
-            String matchedTime = matchSlotTime(byDate, time);
-
-            if (matchedTime != null) {
-
-                state.pendingRescheduleDetails = false;
-                state.pendingConfirmReschedule = true;
-                state.rescheduleDoctorKey = resolvedDoctorKey;
-                state.rescheduleDate = date;
-                state.rescheduleTime = matchedTime;
-
-                return Optional.of(
-                        "Alright, I can move it to "
-                                + date + " at " + matchedTime
-                                + ". Should I confirm the new time?");
-            }
-        }
-    }
-
-    /*
-     * =========================================================
-     * ✅ ASK AVAILABILITY
-     * =========================================================
-     */
-
-    if (extracted.intent.equals("ask_availability")) {
+    if ("ask_availability".equals(extracted.intent)) {
 
         Map<String, Map<String, List<String>>> slots =
                 appointmentService.getAvailableSlotsForNextWeek();
 
         if (slots.isEmpty())
-            return Optional.of("No slots at the moment.");
+            return Optional.of("No slots available right now.");
 
         String doctorKey = extracted.doctorKey;
 
@@ -231,20 +174,60 @@ public class BookingFlowService {
             return Optional.of("Which doctor would you like me to check?");
 
         if (!slots.containsKey(doctorKey))
-            return Optional.of("No slots for that doctor right now.");
+            return Optional.of("That doctor doesn't have availability right now.");
 
         Map<String, List<String>> byDate = slots.get(doctorKey);
 
-        String nearest = buildNearestSlotSentence(doctorKey, byDate, null);
+        List<String> sortedDates = new ArrayList<>(byDate.keySet());
+        sortedDates.sort(Comparator.comparing(LocalDate::parse));
 
-        return Optional.of(nearest);
+        for (String d : sortedDates) {
+            List<String> times = byDate.get(d);
+            if (times != null && !times.isEmpty()) {
+
+                String time = times.get(0);
+
+                PendingStateDto s = getOrCreate(callSid);
+                s.lastSuggestedDoctorKey = doctorKey;
+                s.lastSuggestedDate = d;
+
+                return Optional.of(
+                        "The nearest available slot is " + d +
+                        " at " + time +
+                        ". Would that work?");
+            }
+        }
+
+        return Optional.of("No available slots found.");
     }
 
-    /*
-     * =========================================================
-     * ✅ UNCLEAR INPUT DURING ACTIVE FLOW
-     * =========================================================
-     */
+    /* =========================================================
+       ✅ CONFIRMATION AFTER DETAILS
+       ========================================================= */
+
+    if (state != null && state.pendingNeedNamePhone) {
+
+        if (extracted.patientName != null)
+            state.patientName = extracted.patientName;
+
+        if (extracted.patientPhone != null)
+            state.patientPhone = extracted.patientPhone;
+
+        if (state.patientName != null && state.patientPhone != null) {
+            state.pendingNeedNamePhone = false;
+            state.pendingConfirmBook = true;
+
+            return Optional.of(
+                    phrases.confirmBookingPrompt(
+                            state.doctorKey,
+                            state.date,
+                            state.time));
+        }
+    }
+
+    /* =========================================================
+       ✅ UNCLEAR INPUT DURING FLOW
+       ========================================================= */
 
     if (state != null && state.hasAnyPending()) {
         return Optional.of("Sorry, I didn’t catch that clearly. Could you repeat?");
@@ -252,6 +235,7 @@ public class BookingFlowService {
 
     return Optional.empty();
 }
+
 
 
 	private Optional<String> confirmBook(String callSid, String fromNumber, PendingStateDto state) {
@@ -911,20 +895,17 @@ public class BookingFlowService {
 		return Optional.of(phrases.confirmBookingPrompt(docName, d, time));
 	}
 
-	private String buildAvailableDatesResponse(String doctorName, Map<String, List<String>> byDate) {
+	private boolean isOtherDatesRequest(String text) {
+	    if (text == null) return false;
 
-		List<String> dates = byDate.entrySet().stream().filter(e -> e.getValue() != null && !e.getValue().isEmpty())
-				.map(Map.Entry::getKey).sorted().toList();
+	    String t = text.toLowerCase();
 
-		if (dates.isEmpty())
-			return "No other dates are available.";
-
-		if (dates.size() >= 3) {
-			return "Nearest available slot with " + doctorName + " is available between " + dates.get(0) + " and "
-					+ dates.get(dates.size() - 1) + ". Do you have a preferred date?";
-		}
-
-		return "Available dates are " + String.join(", ", dates) + ". Which works for you?";
+	    return t.contains("other date")
+	            || t.contains("another date")
+	            || t.contains("any other date")
+	            || t.contains("different date")
+	            || t.contains("next date");
 	}
+
 
 }

@@ -39,8 +39,12 @@ public class IntentPriorityResolverService {
 
     public boolean isBookingAllowed(IntentResult result) {
         if (result == null) return false;
-        return result.isSingleIntent(ConversationIntent.CONFIRM_YES) && !result.hasConflict();
+
+        if (result.hasConflict()) return false;
+
+        return result.isSingleIntent(ConversationIntent.CONFIRM_YES);
     }
+
 
     public boolean shouldDeferConfirmationForDoctorInfo(IntentResult result) {
         if (result == null || result.getIntents().isEmpty()) return false;

@@ -12,65 +12,49 @@ import java.util.regex.Pattern;
 public class YesNoClassifierService {
 
     private static final Set<String> AFFIRMATIVE_EXACT = Set.of(
-            "yes", "yeah", "yep", "ya", "yup", "uh huh", "uh-huh", "ok", "okay",
-            "sure", "correct", "right", "absolutely", "definitely", "confirm"
+            "yes","yeah","yep","ya","yup","ok","okay","sure","correct",
+            "right","confirm","confirmed","go ahead","please do","do it"
     );
 
     private static final Set<String> NEGATIVE_EXACT = Set.of(
-            "no", "nope", "nah", "cancel", "never mind", "nevermind",
-            "don't", "dont", "wait", "not now", "not yet", "hold on"
+            "no","nope","nah","cancel","stop","never mind","nevermind",
+            "dont","don't","wait","not now","not yet","hold on"
     );
 
-    private static final Pattern AFFIRMATIVE_PATTERN = Pattern.compile(
-            "\\b(yes|yeah|yep|ya|yup|ok|okay|sure|correct|right|confirm|absolutely|definitely)\\b",
+    private static final Pattern YES_PATTERN = Pattern.compile(
+            "\\b(yes|yeah|yep|ok|okay|sure|confirm|correct|right|go ahead|please do)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
-    private static final Pattern NEGATIVE_PATTERN = Pattern.compile(
-            "\\b(no|nope|nah|cancel|never mind|nevermind|don't|dont|wait|not now|not yet|hold on)\\b",
+    private static final Pattern NO_PATTERN = Pattern.compile(
+            "\\b(no|nope|nah|cancel|stop|never mind|dont|don't|wait|not now)\\b",
             Pattern.CASE_INSENSITIVE
     );
 
-    public YesNoResult classify(String userInput) {
-        if (userInput == null || userInput.isBlank()) {
-            return YesNoResult.UNKNOWN;
-        }
-        String normalized = userInput.trim().toLowerCase();
+    public YesNoResult classify(String input) {
+        if (input == null || input.isBlank()) return YesNoResult.UNKNOWN;
 
-        if (normalized.length() <= 15) {
-            if (AFFIRMATIVE_EXACT.contains(normalized)) {
-                return YesNoResult.YES;
-            }
-            if (NEGATIVE_EXACT.contains(normalized)) {
-                return YesNoResult.NO;
-            }
+        String text = input.trim().toLowerCase();
+
+        if (text.length() <= 20) {
+            if (AFFIRMATIVE_EXACT.contains(text)) return YesNoResult.YES;
+            if (NEGATIVE_EXACT.contains(text)) return YesNoResult.NO;
         }
 
-        if (AFFIRMATIVE_PATTERN.matcher(normalized).find()) {
-            if (NEGATIVE_PATTERN.matcher(normalized).find()) {
-                return YesNoResult.UNKNOWN;
-            }
-            return YesNoResult.YES;
-        }
-        if (NEGATIVE_PATTERN.matcher(normalized).find()) {
-            return YesNoResult.NO;
-        }
-        if (normalized.length() < 30 && normalized.contains("no")) {
-            return YesNoResult.NO;
-        }
+        boolean yes = YES_PATTERN.matcher(text).find();
+        boolean no = NO_PATTERN.matcher(text).find();
+
+        if (yes && !no) return YesNoResult.YES;
+        if (no && !yes) return YesNoResult.NO;
+
         return YesNoResult.UNKNOWN;
     }
 
-    public boolean isAffirmative(String userInput) {
-        return classify(userInput) == YesNoResult.YES;
+    public boolean isAffirmative(String input){
+        return classify(input) == YesNoResult.YES;
     }
 
-    public boolean isNegative(String userInput) {
-        return classify(userInput) == YesNoResult.NO;
-    }
-
-    public boolean isShortAffirmativeOrNegative(String userInput) {
-        if (userInput == null || userInput.length() > 15) return false;
-        return classify(userInput) != YesNoResult.UNKNOWN;
+    public boolean isNegative(String input){
+        return classify(input) == YesNoResult.NO;
     }
 }

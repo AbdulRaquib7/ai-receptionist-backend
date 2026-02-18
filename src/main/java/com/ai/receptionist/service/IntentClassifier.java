@@ -85,7 +85,7 @@ public class IntentClassifier {
         boolean hasChangeDoctor = CHANGE_DOCTOR.matcher(t).find();
         boolean hasProvideDetails = PROVIDE_DETAILS.matcher(t).find();
 
-        if (hasAskDoctorInfo && !hasRequestSlots) {
+        if (hasAskDoctorInfo) {
             intents.add(ConversationIntent.ASK_DOCTOR_INFO);
         }
         if (hasConfirmYes && !hasAskDoctorInfo) {

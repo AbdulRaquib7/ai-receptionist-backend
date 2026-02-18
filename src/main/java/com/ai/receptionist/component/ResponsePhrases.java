@@ -10,7 +10,9 @@ public class ResponsePhrases {
     }
 
     public String confirmBookingPrompt(String doctorName, String date, String time) {
-        return "Alright, so that's " + doctorName + " on " + date + " at " + time + ". Want me to confirm that?";
+        return "Okay, you're booking with " + doctorName +
+               " on " + date + " at " + time +
+               ". Should I confirm the appointment now?";
     }
 
     public String confirmAfterDoctorInfo() {
@@ -50,7 +52,7 @@ public class ResponsePhrases {
     }
 
     public String needNameAndPhone() {
-        return "Sure. What's your name and phone number for the appointment?";
+        return "Got it. May I have your name and phone number for the appointment?";
     }
 
     public String noChangesAbortChoice() {

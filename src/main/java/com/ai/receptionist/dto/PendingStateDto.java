@@ -41,6 +41,10 @@ public class PendingStateDto implements Serializable {
 	
 	public boolean pendingChooseRescheduleAppointment;
 	
+	public String lastSuggestedDoctorKey;
+	
+	public String lastSuggestedDate;
+	
 	public boolean pendingConfirmAbort;
 		
 	public String cancelPatientName;
@@ -59,11 +63,27 @@ public class PendingStateDto implements Serializable {
 	
 	public boolean bookingCompleted;
 	
-    public boolean hasAnyPending() {
-        return pendingConfirmBook || pendingNeedNamePhone || pendingConfirmCancel
-                || pendingConfirmReschedule || pendingRescheduleDetails
-                || pendingChooseCancelAppointment || pendingChooseRescheduleAppointment
-                || pendingConfirmAbort;
-    }
+	public boolean hasAnyPending() {
+	    return pendingConfirmBook
+	            || pendingNeedNamePhone
+	            || pendingConfirmCancel
+	            || pendingConfirmReschedule
+	            || pendingRescheduleDetails
+	            || pendingChooseCancelAppointment
+	            || pendingChooseRescheduleAppointment
+	            || pendingConfirmAbort;
+	}
+
+	public void clearFlowFlags() {
+	    pendingConfirmBook = false;
+	    pendingNeedNamePhone = false;
+	    pendingConfirmCancel = false;
+	    pendingConfirmReschedule = false;
+	    pendingRescheduleDetails = false;
+	    pendingChooseCancelAppointment = false;
+	    pendingChooseRescheduleAppointment = false;
+	    pendingConfirmAbort = false;
+	}
+
 
 }

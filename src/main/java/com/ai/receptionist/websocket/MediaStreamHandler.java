@@ -229,15 +229,36 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     }
 
     private boolean isNoiseWord(String text) {
-        return text.split("\\s+").length == 1 && text.length() <= 4;
-    }
+        if (text == null) return true;
 
+        String cleaned = text.replaceAll("[^a-zA-Z]", "");
+
+        if (cleaned.isBlank()) return true;
+
+        if (cleaned.length() <= 2) return true;
+
+        if (isCriticalConfirmation(cleaned)) return false;
+
+        return cleaned.length() <= 3;
+    }
+    
     private boolean isCriticalConfirmation(String text) {
-        String t = text.trim().toLowerCase();
-        return t.equals("yes") || t.equals("yeah") || t.equals("yep")
-                || t.equals("confirm") || t.equals("correct")
-                || t.equals("right") || t.equals("no")
-                || t.equals("nope") || t.equals("cancel");
+        if (text == null) return false;
+
+        String t = text
+                .trim()
+                .toLowerCase()
+                .replaceAll("[^a-z]", ""); // remove punctuation
+
+        return t.equals("yes")
+                || t.equals("yeah")
+                || t.equals("yep")
+                || t.equals("confirm")
+                || t.equals("correct")
+                || t.equals("right")
+                || t.equals("no")
+                || t.equals("nope")
+                || t.equals("cancel");
     }
 
     private void handleSilence(StreamState state) {
@@ -277,4 +298,6 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         activeStreams.remove(streamSid);
         if (state != null) state.closed = true;
     }
+    
+    
 }
