@@ -95,7 +95,16 @@ public class BookingFlowService {
 			return Optional.of(phrases.unclearAskAgain());
 		}
 		ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
-		if (extracted.isGeneralQuestion) {
+		// Let LLM handle purely general questions (weather, politics, etc.), but only when there is
+		// no concrete appointment intent or structured fields. Mixed messages with booking info
+		// (e.g. "my name is X ... what's the weather") should still be processed here so DB saves.
+		if (extracted.isGeneralQuestion
+				&& "none".equalsIgnoreCase(extracted.intent)
+				&& StringUtils.isBlank(extracted.doctorKey)
+				&& extracted.date == null
+				&& StringUtils.isBlank(extracted.time)
+				&& StringUtils.isBlank(extracted.patientName)
+				&& StringUtils.isBlank(extracted.patientPhone)) {
 			if (state != null && state.hasAnyPending()) {
 				return Optional.of("Sure. " + "And about your appointment — shall we continue?");
 			}
