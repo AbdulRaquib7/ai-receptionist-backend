@@ -36,16 +36,10 @@ public class TwilioService {
         this.restTemplate = builder.build();
     }
 
-    /**
-     * Speak response without ending call
-     */
     public void speakResponse(String callSid, String text) {
         speakResponse(callSid, text, false);
     }
 
-    /**
-     * Speak response and optionally end call AFTER playback.
-     */
     public void speakResponse(String callSid, String text, boolean endCall) {
 
         if (callSid == null || text == null || text.isBlank()) {
@@ -88,9 +82,6 @@ public class TwilioService {
         }
     }
 
-    /**
-     * Force hangup call immediately
-     */
     public void hangupCall(String callSid) {
         if (callSid == null || callSid.isBlank()) return;
 
@@ -121,11 +112,7 @@ public class TwilioService {
             log.warn("Failed to hang up call {}: {}", callSid, e.getMessage());
         }
     }
-
-    /**
-     * Builds Twilio say URL.
-     * If endCall=true, TwiML will hang up AFTER speech finishes.
-     */
+    
     private String buildSayUrl(String text, boolean endCall) {
 
         String encoded;

@@ -25,7 +25,7 @@ public class ConversationHistory {
     private String twilioPhone;
 
     @Column(nullable = false, length = 10)
-    private String role;  // "user" or "assistant"
+    private String role;  
 
     @Column(columnDefinition = "TEXT", nullable = false)
     private String content;

@@ -22,7 +22,6 @@ public class Patient {
     @Column(length = 20)
     private String phone;
 
-    /** Twilio From number - used to match caller for cancel/reschedule */
     @Column(name = "twilio_phone", length = 30)
     private String twilioPhone;
 
