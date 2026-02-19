@@ -129,10 +129,21 @@ public class BookingFlowService {
 					PendingStateDto s = getOrCreate(callSid);
 					s.lastSuggestedDoctorKey = doctorKey;
 					s.lastSuggestedDate = d;
+					s.lastSuggestedTime = time;
 					return Optional.of("The nearest available slot is " + d + " at " + time + ". Would that work?");
 				}
 			}
 			return Optional.of("No available slots found.");
+		}
+		// If we have a previously suggested doctor/date/time and the user now provides
+		// their name/phone, treat this as intent to book that suggestion.
+		if (state != null && state.lastSuggestedDoctorKey != null && state.lastSuggestedDate != null
+				&& state.lastSuggestedTime != null
+				&& (extracted.patientName != null || extracted.patientPhone != null)) {
+			String name = extracted.patientName != null ? extracted.patientName : state.patientName;
+			String phone = extracted.patientPhone != null ? extracted.patientPhone : state.patientPhone;
+			return trySetPendingBook(callSid, fromNumber, state.lastSuggestedDoctorKey, state.lastSuggestedDate,
+					state.lastSuggestedTime, name, phone);
 		}
 		if (state != null && state.pendingNeedNamePhone) {
 			if (extracted.patientName != null)
