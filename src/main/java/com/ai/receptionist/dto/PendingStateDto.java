@@ -44,8 +44,6 @@ public class PendingStateDto implements Serializable {
 	public String lastSuggestedDoctorKey;
 	
 	public String lastSuggestedDate;
-
-	public String lastSuggestedTime;
 	
 	public boolean pendingConfirmAbort;
 		
