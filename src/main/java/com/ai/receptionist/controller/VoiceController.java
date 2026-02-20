@@ -101,6 +101,10 @@ public class VoiceController {
         return continueCallTwiMl();
     }
 
+    /**
+     * After AI speaks: re-connect stream only (silent — no spoken phrase).
+     * Do NOT redirect to inbound (that would replay the greeting).
+     */
     private ResponseEntity<String> continueCallTwiMl() {
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + connectTwiml + "</Response>";

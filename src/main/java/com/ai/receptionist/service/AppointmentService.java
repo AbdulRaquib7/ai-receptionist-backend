@@ -91,6 +91,7 @@ public class AppointmentService {
                 .collect(Collectors.toList());
     }
 
+    /** Upcoming appointments only: slot date >= today. Use for listing, cancel, reschedule so we never mention past appointments. */
     @Transactional(readOnly = true)
     public List<AppointmentSummary> getUpcomingAppointmentSummaries(String twilioPhone) {
         LocalDate today = LocalDate.now();
@@ -127,6 +128,7 @@ public class AppointmentService {
                 a.getSlot().getStartTime()));
     }
 
+    /** Upcoming appointment by patient name; empty if not found or appointment is in the past. */
     @Transactional(readOnly = true)
     public Optional<AppointmentSummary> getUpcomingAppointmentSummary(String twilioPhone, String patientName) {
         List<AppointmentSummary> upcoming = getUpcomingAppointmentSummaries(twilioPhone);
@@ -329,6 +331,10 @@ public class AppointmentService {
         return Optional.of(existing);
     }
 
+    /**
+     * Find the nearest upcoming confirmed appointment entity for this caller (and optional patient name).
+     * Only considers slots with slotDate >= today so we never cancel/reschedule past appointments.
+     */
     @Transactional(readOnly = true)
     private Optional<Appointment> getUpcomingAppointmentEntity(String twilioPhone, String patientName) {
         LocalDate today = LocalDate.now();

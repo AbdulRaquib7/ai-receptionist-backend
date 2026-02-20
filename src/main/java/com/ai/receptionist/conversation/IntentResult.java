@@ -6,6 +6,9 @@ import java.util.Set;
 
 import com.ai.receptionist.utils.ConversationIntent;
 
+/**
+ * Result of multi-intent classification. Supports conflict detection for strict confirmation gating.
+ */
 public final class IntentResult {
 
     private final Set<ConversationIntent> intents;

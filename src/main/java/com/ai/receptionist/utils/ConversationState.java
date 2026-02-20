@@ -1,5 +1,9 @@
 package com.ai.receptionist.utils;
 
+/**
+ * State machine for the AI receptionist conversation flow.
+ * All states are driven by DB data; no hardcoded business logic.
+ */
 public enum ConversationState {
     START,
     BOOK_APPOINTMENT,

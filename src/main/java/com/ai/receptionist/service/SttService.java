@@ -98,7 +98,7 @@ public class SttService {
                 8000f,
                 8,
                 1,
-                1,          
+                1,          // frame size = 1 byte
                 8000f,
                 false
         );
@@ -108,7 +108,7 @@ public class SttService {
                 8000f,
                 16,
                 1,
-                2,          
+                2,          // frame size = 2 bytes
                 8000f,
                 false
         );

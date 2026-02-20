@@ -9,6 +9,10 @@ import java.util.EnumSet;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+/**
+ * Multi-intent classifier. Detects all intents in user text; supports conflict resolution
+ * (e.g. CONFIRM_YES + ASK_DOCTOR_INFO → ASK_DOCTOR_INFO takes precedence).
+ */
 @Service
 public class IntentClassifier {
 
@@ -17,6 +21,7 @@ public class IntentClassifier {
             Pattern.CASE_INSENSITIVE
     );
 
+    /** Excludes CONFIRM_YES when user means "verify/explain doctor" or "before I book", not "confirm the booking". */
     private static final Pattern CONFIRM_YES_EXCLUDE = Pattern.compile(
             "\\b(confirm the doctor|confirm who|confirm (which|what) doctor|before (i |we )?book|before booking)\\b",
             Pattern.CASE_INSENSITIVE
