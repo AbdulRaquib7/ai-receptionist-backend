@@ -22,6 +22,10 @@ import javax.sound.sampled.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 
+/**
+ * Speech-to-Text using OpenAI Whisper.
+ * Converts Twilio μ-law audio → PCM WAV before transcription.
+ */
 @Service
 public class SttService {
 
@@ -91,29 +95,35 @@ public class SttService {
         }
     }
 
+    /**
+     * Convert Twilio μ-law (8kHz) to PCM WAV for Whisper.
+     */
     private byte[] convertMulawToWav(byte[] mulaw) throws Exception {
 
+        // μ-law: 8kHz, mono, 8-bit, 1 byte per frame
         AudioFormat mulawFormat = new AudioFormat(
                 AudioFormat.Encoding.ULAW,
                 8000f,
                 8,
                 1,
-                1,          
+                1,          // frame size = 1 byte
                 8000f,
                 false
         );
 
+        // PCM: 16-bit signed
         AudioFormat pcmFormat = new AudioFormat(
                 AudioFormat.Encoding.PCM_SIGNED,
                 8000f,
                 16,
                 1,
-                2,          
+                2,          // frame size = 2 bytes
                 8000f,
                 false
         );
 
-        long frameLength = mulaw.length; 
+        // ✅ CORRECT frame length (NOT mulaw.length blindly)
+        long frameLength = mulaw.length; // 1 byte per frame for μ-law
 
         try (
                 ByteArrayInputStream bais = new ByteArrayInputStream(mulaw);

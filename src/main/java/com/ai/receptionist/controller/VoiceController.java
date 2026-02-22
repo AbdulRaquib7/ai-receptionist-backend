@@ -12,10 +12,6 @@ import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.ai.receptionist.component.ResponsePhrases;
-
-import java.util.Map;
-
 @RestController
 public class VoiceController {
 
@@ -29,33 +25,21 @@ public class VoiceController {
     @Value("${twilio.base-url:}")
     private String baseUrl;
 
-    private final ResponsePhrases responsePhrases;
-
-    public VoiceController(ResponsePhrases responsePhrases) {
-        this.responsePhrases = responsePhrases;
-    }
-
     @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> inbound(@RequestParam(required = false) Map<String, String> params) {
-        return inboundTwiMl(params);
+    public ResponseEntity<String> inbound() {
+        return inboundTwiMl();
     }
 
     @PostMapping(value = "/twilio/voice/inbound", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> twilioVoiceInbound(@RequestParam(required = false) Map<String, String> params) {
-        return inboundTwiMl(params);
+    public ResponseEntity<String> twilioVoiceInbound() {
+        return inboundTwiMl();
     }
 
-    private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
-        String from = params != null ? params.getOrDefault("From", "") : "";
-        String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(responsePhrases.greeting()) + "</prosody></Say>";
-        String streamParams = "";
-        if (StringUtils.hasText(from)) {
-            streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";
-        }
-        String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\">" + streamParams + "</Stream></Connect>";
+    private ResponseEntity<String> inboundTwiMl() {
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Hello, how can I help you?</Say>";
+        String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
-        log.info("Inbound call -> stream to {} | callSid={} from={}", mediaStreamUrl, callSid, from);
+        log.info("Inbound call -> stream to {}", mediaStreamUrl);
         return ResponseEntity.ok(twiml);
     }
 
@@ -67,24 +51,19 @@ public class VoiceController {
             return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
         }
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(text) + "</prosody></Say>";
-        if (endCall) {
-            // Hang up immediately after speaking - no redirect, more reliable
-            String twiml = "<Response>" + sayTwiml + "<Hangup/></Response>";
-            log.info("Conversation ended -> hanging up call");
-            return ResponseEntity.ok(twiml);
-        }
-        String redirectPath = "/twilio/voice/continue-call";
+        String redirectPath = endCall ? "/twilio/voice/goodbye" : "/twilio/voice/continue-call";
         String redirectUrl = StringUtils.hasText(baseUrl)
             ? baseUrl.trim().replaceAll("/$", "") + redirectPath
             : redirectPath;
-        String twiml = "<Response>" + sayTwiml + "<Redirect>" + escapeXml(redirectUrl) + "</Redirect></Response>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">" + escapeXml(text) + "</Say>";
+        String redirectTwiml = "<Redirect>" + escapeXml(redirectUrl) + "</Redirect>";
+        String twiml = "<Response>" + sayTwiml + redirectTwiml + "</Response>";
         return ResponseEntity.ok(twiml);
     }
 
     @RequestMapping(value = "/twilio/voice/goodbye", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> goodbye() {
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">Thank you, goodbye.</prosody></Say>";
+        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\">Thank you, goodbye.</Say>";
         String hangupTwiml = "<Hangup/>";
         String twiml = "<Response>" + sayTwiml + hangupTwiml + "</Response>";
         log.info("Conversation ended -> hanging up call");
@@ -101,10 +80,14 @@ public class VoiceController {
         return continueCallTwiMl();
     }
 
+    /**
+     * After AI speaks: re-connect stream only (no "I'm listening", no pause).
+     * Do NOT redirect to inbound (that would replay "Hello, how can I help you?").
+     */
     private ResponseEntity<String> continueCallTwiMl() {
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
         String twiml = "<Response>" + connectTwiml + "</Response>";
-        log.debug("Continue call -> re-connect stream");
+        log.info("Continue call -> re-connect stream (no I'm listening)");
         return ResponseEntity.ok(twiml);
     }
 
