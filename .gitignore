@@ -1,11 +1,26 @@
+# Maven
 target/
-!.mvn/wrapper/maven-wrapper.jar
-*.class
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
 *.jar
 *.war
-*.log
+*.ear
+*.class
+
+# IDE
 .idea/
 *.iml
+.project
+.classpath
+.settings/
+.factorypath
+
+# Logs
+*.log
+tts-logs/
+
+# OS
 .DS_Store
-data/
-application-local.properties
+Thumbs.db

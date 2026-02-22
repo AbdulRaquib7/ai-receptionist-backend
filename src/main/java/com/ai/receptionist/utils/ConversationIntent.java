@@ -1,0 +1,16 @@
+package com.ai.receptionist.utils;
+
+public enum ConversationIntent {
+    ASK_DOCTOR_INFO,
+    REQUEST_SLOTS,
+    CONFIRM_YES,
+    CONFIRM_NO,
+    CHANGE_DOCTOR,
+    PROVIDE_DETAILS,
+    BOOK_APPOINTMENT,
+    CANCEL_APPOINTMENT,
+    RESCHEDULE_APPOINTMENT,
+    CHECK_APPOINTMENTS,
+    GENERAL_QUERY,
+    NONE
+}

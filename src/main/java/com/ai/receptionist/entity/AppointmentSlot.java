@@ -4,7 +4,6 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.LocalDate;
-import java.time.LocalTime;
 
 @Entity
 @Table(name = "appointment_slot", uniqueConstraints = {
@@ -30,17 +29,10 @@ public class AppointmentSlot {
     @Column(name = "slot_date", nullable = false)
     private LocalDate slotDate;
 
-    @Column(name = "start_time", nullable = false)
-    private LocalTime startTime;
-
-    @Column(name = "end_time", nullable = false)
-    private LocalTime endTime;
+    @Column(name = "start_time", nullable = false, length = 10)
+    private String startTime;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Builder.Default
     private Status status = Status.AVAILABLE;
-
-    @Version
-    private Long version;
 }

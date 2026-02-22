@@ -3,6 +3,8 @@ package com.ai.receptionist.entity;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.time.Instant;
+
 @Entity
 @Table(name = "appointment")
 @Getter
@@ -27,11 +29,18 @@ public class Appointment {
     private Doctor doctor;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "slot_id", nullable = false, unique = true)
+    @JoinColumn(name = "slot_id", nullable = false)
     private AppointmentSlot slot;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    @Builder.Default
     private Status status = Status.CONFIRMED;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private Instant createdAt;
+
+    @PrePersist
+    protected void onCreate() {
+        createdAt = Instant.now();
+    }
 }

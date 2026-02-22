@@ -16,16 +16,20 @@ public class Doctor {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
-    private String name;
+    @Column(nullable = false, unique = true, length = 50)
+    private String key;
 
-    @Column(nullable = false)
+    @Column(nullable = false, length = 100)
+    private String name;
+    
     private String specialization;
 
-    @Column(length = 500)
-    private String description;
+    @Column(name = "schedule_start", nullable = false, length = 5)
+    private String scheduleStart;
+
+    @Column(name = "schedule_end", nullable = false, length = 5)
+    private String scheduleEnd;
 
     @Column(nullable = false)
-    @Builder.Default
-    private Boolean isActive = true;
+    private boolean active = true;
 }
