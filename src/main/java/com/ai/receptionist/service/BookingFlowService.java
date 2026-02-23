@@ -130,6 +130,17 @@ public Optional<FlowResponse> processUserMessage(
         return Optional.of(FlowResponse.of(FlowResponse.Type.REPEAT));
     }
 
+    if (isBookingWithDoctorHint(normalized)) {
+        String fastDoctorKey = normalizeDoctorKey(userText);
+        if (fastDoctorKey != null) {
+            Optional<FlowResponse> fast = suggestNearestSlotForDoctor(callSid, fastDoctorKey);
+            if (fast.isPresent()) {
+                log.debug("[{}] flow: SUGGEST_SLOT (fast path) doctor={}", callSid, fastDoctorKey);
+                return fast;
+            }
+        }
+    }
+
     ExtractedIntent extracted =
             extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
@@ -146,47 +157,26 @@ public Optional<FlowResponse> processUserMessage(
         }
     }
 
-    if ("ask_availability".equals(extracted.intent)) {
-
-        Map<String, Map<String, List<String>>> slots =
-                appointmentService.getAvailableSlotsForNextWeek();
-
-        if (slots.isEmpty())
-            return Optional.of(FlowResponse.message("noSlots"));
+    if ("ask_availability".equals(extracted.intent) || "book".equals(extracted.intent)) {
 
         String doctorKey = extracted.doctorKey;
-
+        if (doctorKey == null && "book".equals(extracted.intent)) {
+            log.debug("[{}] flow: LIST_DOCTORS (book, no doctor)", callSid);
+            return buildListDoctorsResponse();
+        }
         if (doctorKey == null)
             return Optional.of(FlowResponse.message("whichDoctor"));
 
-        if (!slots.containsKey(doctorKey))
+        Optional<FlowResponse> slot = suggestNearestSlotForDoctor(callSid, doctorKey);
+        if (slot.isPresent()) return slot;
+        if (!appointmentService.getAvailableSlotsForNextWeek().containsKey(doctorKey))
             return Optional.of(FlowResponse.message("doctorNoAvailability"));
-
-        Map<String, List<String>> byDate = slots.get(doctorKey);
-
-        List<String> sortedDates = new ArrayList<>(byDate.keySet());
-        sortedDates.sort(Comparator.comparing(LocalDate::parse));
-
-        List<Doctor> doctors = appointmentService.getAllDoctors();
-        String doctorName = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().map(Doctor::getName).orElse(doctorKey);
-
-        for (String d : sortedDates) {
-            List<String> times = byDate.get(d);
-            if (times != null && !times.isEmpty()) {
-
-                String time = times.get(0);
-
-                PendingStateDto s = getOrCreate(callSid);
-                s.lastSuggestedDoctorKey = doctorKey;
-                s.lastSuggestedDate = d;
-                s.lastSuggestedTime = time;
-
-                log.debug("[{}] flow: SUGGEST_SLOT doctor={} date={} time={}", callSid, doctorKey, d, time);
-                return Optional.of(FlowResponse.suggestSlot(doctorKey, doctorName, d, time));
-            }
-        }
-
         return Optional.of(FlowResponse.message("noAvailableSlotsFound"));
+    }
+
+    if ("list_doctors".equals(extracted.intent)) {
+        log.debug("[{}] flow: LIST_DOCTORS", callSid);
+        return buildListDoctorsResponse();
     }
 
     /* =========================================================
@@ -420,7 +410,7 @@ public Optional<FlowResponse> processUserMessage(
 		// This keeps behaviour data-driven: we only map to a doctor if a matching
 		// specialization actually exists in the database.
 		String targetSpecialization = null;
-		if (lower.contains("tooth") || lower.contains("teeth") || lower.contains("dental")) {
+		if (lower.contains("tooth") || lower.contains("teeth") || lower.contains("dental") || lower.contains("dentist")) {
 			targetSpecialization = "dentist";
 		} else if (lower.contains("heart") || lower.contains("cardio") || lower.contains("chest pain")) {
 			targetSpecialization = "cardiologist";
@@ -456,6 +446,40 @@ public Optional<FlowResponse> processUserMessage(
 			return doctors.stream().filter(d -> "dr-ahmed".equals(d.getKey())).findFirst().map(Doctor::getKey)
 					.orElse(null);
 		return null;
+	}
+
+	private boolean isBookingWithDoctorHint(String normalized) {
+		if (normalized == null) return false;
+		boolean booking = normalized.contains("book") || normalized.contains("appointment")
+				|| normalized.contains("need") || normalized.contains("want") || normalized.contains("get");
+		boolean doctorHint = normalized.contains("dentist") || normalized.contains("dental")
+				|| normalized.contains("tooth") || normalized.contains("teeth")
+				|| normalized.contains("heart") || normalized.contains("cardio")
+				|| normalized.contains("ent") || normalized.contains("throat") || normalized.contains("ear") || normalized.contains("nose");
+		return booking || doctorHint;
+	}
+
+	private Optional<FlowResponse> suggestNearestSlotForDoctor(String callSid, String doctorKey) {
+		Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
+		if (slots.isEmpty() || !slots.containsKey(doctorKey))
+			return Optional.empty();
+		Map<String, List<String>> byDate = slots.get(doctorKey);
+		List<String> sortedDates = new ArrayList<>(byDate.keySet());
+		sortedDates.sort(Comparator.comparing(LocalDate::parse));
+		List<Doctor> doctors = appointmentService.getAllDoctors();
+		String doctorName = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().map(Doctor::getName).orElse(doctorKey);
+		for (String d : sortedDates) {
+			List<String> times = byDate.get(d);
+			if (times != null && !times.isEmpty()) {
+				String time = times.get(0);
+				PendingStateDto s = getOrCreate(callSid);
+				s.lastSuggestedDoctorKey = doctorKey;
+				s.lastSuggestedDate = d;
+				s.lastSuggestedTime = time;
+				return Optional.of(FlowResponse.suggestSlot(doctorKey, doctorName, d, time));
+			}
+		}
+		return Optional.empty();
 	}
 
 	private boolean isListDoctorsRequest(String normalized) {

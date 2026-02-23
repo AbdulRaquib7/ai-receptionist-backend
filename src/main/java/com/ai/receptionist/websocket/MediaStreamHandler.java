@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.io.ByteArrayOutputStream;
 import java.util.*;
@@ -31,12 +32,19 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
+    private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
     private final ConversationOrchestrator orchestrator;
     private final ResponsePhrases phrases;
+
+    @Value("${openai.api-key:}")
+    private String openAiApiKey;
+
+    @Value("${openai.model:gpt-4o-mini}")
+    private String openAiModel;
 
     public MediaStreamHandler(
             SttService sttService,
@@ -58,6 +66,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         boolean processing = false;
         boolean closed = false;
         String callSid;
+        String fromNumber;
         long connectedAt;
     }
 
@@ -74,7 +83,18 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
             StreamState state = new StreamState();
             state.connectedAt = System.currentTimeMillis();
-            state.callSid = root.path("start").path("callSid").asText("");
+            JsonNode start = root.path("start");
+            state.callSid = start.path("callSid").asText("");
+            JsonNode custom = start.path("customParameters");
+            if (!custom.isMissingNode()) {
+                String from = custom.path("From").asText("");
+                if (!from.isEmpty()) {
+                    state.fromNumber = from;
+                    callSidToFrom.put(state.callSid, from);
+                }
+            }
+            if (state.fromNumber == null)
+                state.fromNumber = callSidToFrom.get(state.callSid);
 
             streams.put(streamSid, state);
 
@@ -161,13 +181,23 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                     return;
                 }
 
+                String fromNumber = state.fromNumber != null ? state.fromNumber : "";
+                String trimmed = text.trim();
+                conversationStore.appendUser(state.callSid, fromNumber, trimmed);
+
+                List<String> summary = conversationStore.getConversationSummary(state.callSid);
+                List<ChatMessage> history = conversationStore.getHistory(state.callSid);
+
                 ConversationOrchestrator.OrchestratorResult result =
-                        orchestrator.process(state.callSid, "", text,
-                                List.of(), List.of(), "", "");
+                        orchestrator.process(state.callSid, fromNumber, trimmed,
+                                summary, history, openAiApiKey, openAiModel);
 
                 String reply = result.getTextToSpeak();
 
                 log.info("🤖 AI RESPONSE: {}", reply);
+
+                if (StringUtils.isNotBlank(reply))
+                    conversationStore.appendAssistant(state.callSid, fromNumber, reply);
 
                 twilioService.speakResponse(state.callSid, reply, result.isEndCall());
 
