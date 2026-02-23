@@ -2,6 +2,7 @@ package com.ai.receptionist.service;
 
 import com.ai.receptionist.component.ResponsePhrases;
 import com.ai.receptionist.conversation.IntentResult;
+import com.ai.receptionist.dto.FlowResponse;
 import com.ai.receptionist.dto.PendingStateDto;
 import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Doctor;
@@ -49,7 +50,7 @@ public class BookingFlowService {
 		this.intentPriorityResolver = intentPriorityResolver;
 	}
 
-public Optional<String> processUserMessage(
+public Optional<FlowResponse> processUserMessage(
         String callSid,
         String fromNumber,
         String userText,
@@ -65,23 +66,23 @@ public Optional<String> processUserMessage(
 
     PendingStateDto state = pendingByCall.get(callSid);
 
-    /* =========================================================
-       ✅ END CALL / ABORT
-       ========================================================= */
-
     if (state != null && isAbortBookingRequest(normalized)) {
         clearPending(callSid);
-        return Optional.of("No problem. I've stopped the booking. Let me know if you'd like to start again.");
+        log.debug("[{}] flow: ABORT_BOOKING", callSid);
+        return Optional.of(FlowResponse.of(FlowResponse.Type.ABORT_BOOKING));
     }
 
     if (wantsToEndCall(normalized)) {
         clearPending(callSid);
-        return Optional.of(phrases.goodbye());
+        log.debug("[{}] flow: GOODBYE", callSid);
+        return Optional.of(FlowResponse.of(FlowResponse.Type.GOODBYE));
     }
 
-    /* =========================================================
-       ✅ HANDLE YES/NO EVEN IF SHORT
-       ========================================================= */
+    if (isFarewellOrDeclineMoreHelp(normalized, conversationSummary)) {
+        clearPending(callSid);
+        log.debug("[{}] flow: GOODBYE (farewell after anything else)", callSid);
+        return Optional.of(FlowResponse.of(FlowResponse.Type.GOODBYE));
+    }
 
     YesNoResult yesNo = yesNoClassifier.classify(userText);
 
@@ -93,13 +94,10 @@ public Optional<String> processUserMessage(
 
         if (yesNo == YesNoResult.NO) {
             state.pendingConfirmBook = false;
-            return Optional.of("Okay, no problem. Would you like a different time?");
+            log.debug("[{}] flow: CONFIRM_BOOKING declined", callSid);
+            return Optional.of(FlowResponse.message("differentTime"));
         }
     }
-
-    /* =========================================================
-       ✅ HANDLE OTHER DATES REQUEST
-       ========================================================= */
 
     if (state != null
             && isOtherDatesRequest(normalized)
@@ -112,7 +110,7 @@ public Optional<String> processUserMessage(
                 slots.get(state.lastSuggestedDoctorKey);
 
         if (byDate == null || byDate.isEmpty())
-            return Optional.of("No other dates available.");
+            return Optional.of(FlowResponse.message("noSlots"));
 
         List<String> dates = new ArrayList<>(byDate.keySet());
         dates.sort(Comparator.comparing(LocalDate::parse));
@@ -122,25 +120,15 @@ public Optional<String> processUserMessage(
         }
 
         if (dates.isEmpty())
-            return Optional.of("That's the only available date.");
+            return Optional.of(FlowResponse.message("noOtherDates"));
 
-        return Optional.of(
-                "Sure — we also have " +
-                        String.join(" and ", dates) +
-                        ". Which works for you?");
+        log.debug("[{}] flow: OFFER_OTHER_DATES", callSid);
+        return Optional.of(FlowResponse.offerOtherDates(String.join(" and ", dates)));
     }
-
-    /* =========================================================
-       ✅ PREVENT FOREIGN / UNCLEAR BREAK
-       ========================================================= */
 
     if (isLikelyForeignOrUnclearText(userText)) {
-        return Optional.of(phrases.unclearAskAgain());
+        return Optional.of(FlowResponse.of(FlowResponse.Type.REPEAT));
     }
-
-    /* =========================================================
-       ✅ GENERAL QUESTION HANDLING
-       ========================================================= */
 
     ExtractedIntent extracted =
             extractIntent(userText, conversationSummary, openAiKey, openAiModel);
@@ -148,17 +136,15 @@ public Optional<String> processUserMessage(
     if (extracted.isGeneralQuestion) {
 
         if (state != null && state.hasAnyPending()) {
-            return Optional.of(
-                    "Sure. " +
-                    "And about your appointment — shall we continue?");
+            return Optional.of(FlowResponse.of(FlowResponse.Type.RETURN_TO_FLOW));
         }
 
-        return Optional.empty(); // let LLM answer
+        boolean noBookingFields = extracted.doctorKey == null && extracted.date == null
+                && extracted.time == null && extracted.patientName == null && extracted.patientPhone == null;
+        if ("none".equals(extracted.intent) && noBookingFields) {
+            return Optional.empty();
+        }
     }
-
-    /* =========================================================
-       ✅ ASK AVAILABILITY (NEAREST FIRST)
-       ========================================================= */
 
     if ("ask_availability".equals(extracted.intent)) {
 
@@ -166,20 +152,23 @@ public Optional<String> processUserMessage(
                 appointmentService.getAvailableSlotsForNextWeek();
 
         if (slots.isEmpty())
-            return Optional.of("No slots available right now.");
+            return Optional.of(FlowResponse.message("noSlots"));
 
         String doctorKey = extracted.doctorKey;
 
         if (doctorKey == null)
-            return Optional.of("Which doctor would you like me to check?");
+            return Optional.of(FlowResponse.message("whichDoctor"));
 
         if (!slots.containsKey(doctorKey))
-            return Optional.of("That doctor doesn't have availability right now.");
+            return Optional.of(FlowResponse.message("doctorNoAvailability"));
 
         Map<String, List<String>> byDate = slots.get(doctorKey);
 
         List<String> sortedDates = new ArrayList<>(byDate.keySet());
         sortedDates.sort(Comparator.comparing(LocalDate::parse));
+
+        List<Doctor> doctors = appointmentService.getAllDoctors();
+        String doctorName = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().map(Doctor::getName).orElse(doctorKey);
 
         for (String d : sortedDates) {
             List<String> times = byDate.get(d);
@@ -190,20 +179,34 @@ public Optional<String> processUserMessage(
                 PendingStateDto s = getOrCreate(callSid);
                 s.lastSuggestedDoctorKey = doctorKey;
                 s.lastSuggestedDate = d;
+                s.lastSuggestedTime = time;
 
-                return Optional.of(
-                        "The nearest available slot is " + d +
-                        " at " + time +
-                        ". Would that work?");
+                log.debug("[{}] flow: SUGGEST_SLOT doctor={} date={} time={}", callSid, doctorKey, d, time);
+                return Optional.of(FlowResponse.suggestSlot(doctorKey, doctorName, d, time));
             }
         }
 
-        return Optional.of("No available slots found.");
+        return Optional.of(FlowResponse.message("noAvailableSlotsFound"));
     }
 
     /* =========================================================
        ✅ CONFIRMATION AFTER DETAILS
        ========================================================= */
+
+    if (state != null
+            && state.lastSuggestedDoctorKey != null
+            && state.lastSuggestedDate != null
+            && state.lastSuggestedTime != null
+            && extracted.patientName != null
+            && extracted.patientPhone != null) {
+        Optional<FlowResponse> tryBook = trySetPendingBook(callSid, fromNumber,
+                state.lastSuggestedDoctorKey, state.lastSuggestedDate, state.lastSuggestedTime,
+                extracted.patientName, extracted.patientPhone);
+        if (tryBook.isPresent()) {
+            log.debug("[{}] flow: CONFIRM_BOOKING (from name/phone after slot)", callSid);
+            return tryBook;
+        }
+    }
 
     if (state != null && state.pendingNeedNamePhone) {
 
@@ -217,11 +220,11 @@ public Optional<String> processUserMessage(
             state.pendingNeedNamePhone = false;
             state.pendingConfirmBook = true;
 
-            return Optional.of(
-                    phrases.confirmBookingPrompt(
-                            state.doctorKey,
-                            state.date,
-                            state.time));
+            List<Doctor> doctorsForName = appointmentService.getAllDoctors();
+            String docName = doctorsForName.stream().filter(d -> state.doctorKey != null && state.doctorKey.equals(d.getKey())).findFirst().map(Doctor::getName).orElse(state.doctorKey);
+
+            log.debug("[{}] flow: CONFIRM_BOOKING", callSid);
+            return Optional.of(FlowResponse.confirmBooking(docName, state.date, state.time));
         }
     }
 
@@ -230,7 +233,7 @@ public Optional<String> processUserMessage(
        ========================================================= */
 
     if (state != null && state.hasAnyPending()) {
-        return Optional.of("Sorry, I didn’t catch that clearly. Could you repeat?");
+        return Optional.of(FlowResponse.of(FlowResponse.Type.REPEAT));
     }
 
     return Optional.empty();
@@ -238,17 +241,16 @@ public Optional<String> processUserMessage(
 
 
 
-	private Optional<String> confirmBook(String callSid, String fromNumber, PendingStateDto state) {
+	private Optional<FlowResponse> confirmBook(String callSid, String fromNumber, PendingStateDto state) {
 		if (!state.pendingConfirmBook) {
 			throw new IllegalStateException("Booking attempted without confirmation.");
 		}
 		if (state.bookingLocked) {
-			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
-					+ ". We'll see you then. Take care!");
+			return Optional.of(FlowResponse.of(FlowResponse.Type.CONFIRMED, Map.of("date", state.date, "time", state.time), false));
 		}
 		if (StringUtils.isBlank(state.doctorKey) || state.date == null || StringUtils.isBlank(state.time)) {
 			clearPending(callSid);
-			return Optional.of("I don't have the full booking details. Let's try again.");
+			return Optional.of(FlowResponse.message("tryAgainDetails"));
 		}
 		String twilioPhone = StringUtils.isNotBlank(fromNumber) ? fromNumber : state.patientPhone;
 		Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName,
@@ -259,48 +261,50 @@ public Optional<String> processUserMessage(
 			state.currentState = ConversationState.COMPLETED;
 			log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey,
 					state.date, state.time);
-			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
-					+ ". We'll see you then. Take care!");
+			Map<String, Object> p = new HashMap<>();
+			p.put("date", state.date);
+			p.put("time", state.time);
+			return Optional.of(FlowResponse.of(FlowResponse.Type.CONFIRMED, p, false));
 		}
-		return Optional.of(phrases.slotUnavailable());
+		return Optional.of(FlowResponse.of(FlowResponse.Type.SLOT_UNAVAILABLE));
 	}
 
-	private Optional<String> confirmCancel(String callSid, String fromNumber, String patientName) {
+	private Optional<FlowResponse> confirmCancel(String callSid, String fromNumber, String patientName) {
 		boolean ok = appointmentService.cancelAppointment(fromNumber, patientName);
 		clearPending(callSid);
 		if (ok) {
-			return Optional.of(phrases.cancelConfirmed());
+			return Optional.of(FlowResponse.of(FlowResponse.Type.CANCELLED));
 		}
-		return Optional.of("Couldn't cancel that. Want to try again?");
+		return Optional.of(FlowResponse.message("couldntCancel"));
 	}
 
-	private Optional<String> confirmReschedule(String callSid, String fromNumber, PendingStateDto state) {
+	private Optional<FlowResponse> confirmReschedule(String callSid, String fromNumber, PendingStateDto state) {
 		if (StringUtils.isBlank(state.rescheduleDoctorKey) || state.rescheduleDate == null
 				|| StringUtils.isBlank(state.rescheduleTime)) {
 			clearPending(callSid);
-			return Optional.of("I don't have the new slot. Let's try again.");
+			return Optional.of(FlowResponse.message("tryAgainNewSlot"));
 		}
 		Optional<Appointment> result = appointmentService.rescheduleAppointment(fromNumber, state.reschedulePatientName,
 				state.rescheduleDoctorKey, state.rescheduleDate, state.rescheduleTime);
 		clearPending(callSid);
 		if (result.isPresent()) {
-			return Optional.of(phrases.rescheduleConfirmed());
+			return Optional.of(FlowResponse.of(FlowResponse.Type.RESCHEDULED));
 		}
-		return Optional.of(phrases.slotUnavailable());
+		return Optional.of(FlowResponse.of(FlowResponse.Type.SLOT_UNAVAILABLE));
 	}
 
-	private Optional<String> buildDoctorInfoThenNeedNamePhone(PendingStateDto state, String doctorKey) {
+	private Optional<FlowResponse> buildDoctorInfoThenNeedNamePhone(PendingStateDto state, String doctorKey) {
 		if (StringUtils.isBlank(doctorKey))
-			return Optional.of(phrases.needNameAndPhone());
+			return Optional.of(FlowResponse.of(FlowResponse.Type.ASK_NAME));
 		List<Doctor> doctors = appointmentService.getAllDoctors();
 		Doctor doc = doctors.stream().filter(d -> doctorKey.equals(d.getKey())).findFirst().orElse(null);
 		if (doc == null)
-			return Optional.of(phrases.needNameAndPhone());
+			return Optional.of(FlowResponse.of(FlowResponse.Type.ASK_NAME));
 		String spec = doctorSpecializationPhrase(doc);
-		return Optional.of(doc.getName() + " is our " + spec + " Now, " + phrases.needNameAndPhone().toLowerCase());
+		return Optional.of(FlowResponse.suggestDoctor(doctorKey, doc.getName(), spec));
 	}
 
-	private Optional<String> buildDoctorInfoThenConfirmPrompt(PendingStateDto state) {
+	private Optional<FlowResponse> buildDoctorInfoThenConfirmPrompt(PendingStateDto state) {
 		if (StringUtils.isBlank(state.doctorKey))
 			return Optional.empty();
 		List<Doctor> doctors = appointmentService.getAllDoctors();
@@ -308,7 +312,7 @@ public Optional<String> processUserMessage(
 		if (doc == null)
 			return Optional.empty();
 		String spec = doctorSpecializationPhrase(doc);
-		return Optional.of(doc.getName() + " is our " + spec + " " + phrases.confirmAfterDoctorInfo());
+		return Optional.of(FlowResponse.confirmBooking(doc.getName(), state.date, state.time));
 	}
 
 	private String doctorSpecializationPhrase(Doctor doc) {
@@ -461,10 +465,10 @@ public Optional<String> processUserMessage(
 				|| normalized.contains("available doctors");
 	}
 
-	private Optional<String> buildListDoctorsResponse() {
+	private Optional<FlowResponse> buildListDoctorsResponse() {
 		List<Doctor> doctors = appointmentService.getAllDoctors();
 		if (doctors.isEmpty())
-			return Optional.of("We don't have any doctors available at the moment.");
+			return Optional.of(FlowResponse.message("noDoctorsAvailable"));
 		StringBuilder sb = new StringBuilder("We've got ");
 		for (int i = 0; i < doctors.size(); i++) {
 			Doctor d = doctors.get(i);
@@ -476,7 +480,7 @@ public Optional<String> processUserMessage(
 			}
 		}
 		sb.append(". Which one would you like to book with?");
-		return Optional.of(sb.toString());
+		return Optional.of(FlowResponse.listDoctors(sb.toString()));
 	}
 
 	private boolean isAbortBookingRequest(String text) {
@@ -639,7 +643,7 @@ public Optional<String> processUserMessage(
 	 * booking/cancel state is pending. Prevents "No"/"Nope" from accidentally being
 	 * treated as a CANCEL intent on an existing appointment.
 	 */
-	private Optional<String> handleShortYesNoWithoutPending(String callSid, YesNoResult yesNo,
+	private Optional<FlowResponse> handleShortYesNoWithoutPending(String callSid, YesNoResult yesNo,
 			List<String> conversationSummary) {
 		if (conversationSummary == null || conversationSummary.isEmpty()) {
 			return Optional.empty();
@@ -654,24 +658,21 @@ public Optional<String> processUserMessage(
 		if (yesNo == YesNoResult.NO) {
 			if (lastMsg.contains("anything else") || lastMsg.contains("help you with")) {
 				clearPending(callSid);
-				return Optional.of(phrases.goodbye());
+				return Optional.of(FlowResponse.of(FlowResponse.Type.GOODBYE));
 			}
 			if (lastMsg.contains("end the call")) {
 				clearPending(callSid);
-				return Optional.of(phrases.goodbye());
+				return Optional.of(FlowResponse.of(FlowResponse.Type.GOODBYE));
 			}
-			// Generic "no" that isn't about ending the call – acknowledge but keep the call
-			// alive.
-			return Optional.of("No problem. How else can I help you?");
+			return Optional.of(FlowResponse.message("noProblemHowElse"));
 		}
 
 		if (yesNo == YesNoResult.YES) {
 			if (lastMsg.contains("end the call")) {
 				clearPending(callSid);
-				return Optional.of(phrases.goodbye());
+				return Optional.of(FlowResponse.of(FlowResponse.Type.GOODBYE));
 			}
-			// Generic "yes" – keep conversation open and nudge user.
-			return Optional.of("Sure. What would you like to do?");
+			return Optional.of(FlowResponse.message("sureWhatWouldYouLike"));
 		}
 
 		return Optional.empty();
@@ -866,7 +867,7 @@ public Optional<String> processUserMessage(
 		String patientPhone;
 	}
 
-	public Optional<String> trySetPendingBook(String callSid, String fromNumber, String doctorKey, String date,
+	public Optional<FlowResponse> trySetPendingBook(String callSid, String fromNumber, String doctorKey, String date,
 			String time, String name, String phone) {
 		String d = normalizeDate(date);
 		if (d == null)
@@ -892,7 +893,7 @@ public Optional<String> processUserMessage(
 		List<Doctor> doctors = appointmentService.getAllDoctors();
 		String docName = doctors.stream().filter(doc -> doc.getKey().equals(doctorKey)).findFirst()
 				.map(doc -> doc.getName()).orElse(doctorKey);
-		return Optional.of(phrases.confirmBookingPrompt(docName, d, time));
+		return Optional.of(FlowResponse.confirmBooking(docName, d, time));
 	}
 
 	private boolean isOtherDatesRequest(String text) {

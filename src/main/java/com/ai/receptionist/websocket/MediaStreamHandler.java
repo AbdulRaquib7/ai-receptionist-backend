@@ -3,7 +3,9 @@ package com.ai.receptionist.websocket;
 import com.ai.receptionist.component.ConversationStore;
 import com.ai.receptionist.component.ResponsePhrases;
 import com.ai.receptionist.entity.ChatMessage;
-import com.ai.receptionist.service.*;
+import com.ai.receptionist.service.ConversationOrchestrator;
+import com.ai.receptionist.service.SttService;
+import com.ai.receptionist.service.TwilioService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -34,11 +36,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
-    private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
-    private final BookingFlowService bookingFlowService;
-    private final YesNoClassifierService yesNoClassifier;
+    private final ConversationOrchestrator conversationOrchestrator;
     private final ResponsePhrases phrases;
 
     @Value("${openai.api-key:}")
@@ -49,19 +49,15 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     public MediaStreamHandler(
             SttService sttService,
-            LlmService llmService,
             TwilioService twilioService,
             ConversationStore conversationStore,
-            BookingFlowService bookingFlowService,
-            YesNoClassifierService yesNoClassifier,
+            ConversationOrchestrator conversationOrchestrator,
             ResponsePhrases phrases
     ) {
         this.sttService = sttService;
-        this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
-        this.bookingFlowService = bookingFlowService;
-        this.yesNoClassifier = yesNoClassifier;
+        this.conversationOrchestrator = conversationOrchestrator;
         this.phrases = phrases;
     }
 
@@ -190,22 +186,17 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
                 List<String> summary = conversationStore.getConversationSummary(callSid);
 
-                Optional<String> flowReply =
-                        bookingFlowService.processUserMessage(
-                                callSid, from, trimmed, summary, openAiApiKey, openAiModel);
+                ConversationOrchestrator.OrchestratorResult result =
+                        conversationOrchestrator.process(
+                                callSid, from, trimmed, summary, history, openAiApiKey, openAiModel);
 
-                String aiText = flowReply.orElseGet(() ->
-                        llmService.generateReply(callSid, from, history));
-
+                String aiText = result.getTextToSpeak();
                 if (StringUtils.isBlank(aiText)) return;
 
                 log.info("AI | {}", aiText);
                 conversationStore.appendAssistant(callSid, from, aiText);
 
-                boolean endCall =
-                        aiText.toLowerCase().contains("appointment is confirmed")
-                                || aiText.toLowerCase().contains("you're all set");
-
+                boolean endCall = result.isEndCall();
                 twilioService.speakResponse(callSid, aiText, endCall);
 
                 if (endCall) {
