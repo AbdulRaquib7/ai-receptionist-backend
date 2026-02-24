@@ -62,6 +62,8 @@ public class PendingStateDto implements Serializable {
 	public boolean bookingLocked;
 	
 	public boolean bookingCompleted;
+
+	public String lastSuggestedTime;
 	
 	public boolean hasAnyPending() {
 	    return pendingConfirmBook

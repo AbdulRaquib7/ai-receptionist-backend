@@ -23,21 +23,19 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
-    private static final int SILENCE_FRAMES = 20;
-    private static final int MIN_AUDIO_BYTES = 16000;
+    private static final int SILENCE_FRAMES = 18;
+    private static final int MIN_AUDIO_BYTES = 12000;
+    private static final int MAX_BUFFER_BYTES = 32000;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
-    private final Set<String> activeStreams = ConcurrentHashMap.newKeySet();
-    private final Map<String, String> callSidToFrom = new ConcurrentHashMap<>();
 
     private final SttService sttService;
     private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
     private final BookingFlowService bookingFlowService;
-    private final YesNoClassifierService yesNoClassifier;
     private final ResponsePhrases phrases;
 
     @Value("${openai.api-key:}")
@@ -52,15 +50,13 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             TwilioService twilioService,
             ConversationStore conversationStore,
             BookingFlowService bookingFlowService,
-            YesNoClassifierService yesNoClassifier,
-            ResponsePhrases phrases
-    ) {
+            ResponsePhrases phrases) {
+
         this.sttService = sttService;
         this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
         this.bookingFlowService = bookingFlowService;
-        this.yesNoClassifier = yesNoClassifier;
         this.phrases = phrases;
     }
 
@@ -69,12 +65,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         int silenceFrames = 0;
         boolean processing = false;
         boolean closed = false;
-        int unclearUtterances = 0;
         String callSid;
-        String fromNumber;
-
-        long connectedAt;
-        boolean justReconnected = true;
+        long framesReceived = 0;
     }
 
     @Override
@@ -85,33 +77,14 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         String streamSid = root.path("streamSid").asText();
 
         if ("start".equals(event)) {
-
-            if (!activeStreams.add(streamSid)) {
-                log.debug("Duplicate stream ignored: {}", streamSid);
-                return;
-            }
-
             StreamState state = new StreamState();
-            state.connectedAt = System.currentTimeMillis();
-
-            JsonNode start = root.path("start");
-            state.callSid = start.path("callSid").asText("");
-
-            JsonNode custom = start.path("customParameters");
-            if (!custom.isMissingNode()) {
-                String from = custom.path("From").asText("");
-                if (!from.isEmpty()) {
-                    state.fromNumber = from;
-                    callSidToFrom.put(state.callSid, from);
-                }
-            }
-
-            if (state.fromNumber == null) {
-                state.fromNumber = callSidToFrom.get(state.callSid);
-            }
-
+            state.callSid = root.path("start").path("callSid").asText("");
             streams.put(streamSid, state);
-            log.info("Call started | streamSid={} callSid={}", streamSid, state.callSid);
+
+            log.info("========== STREAM START ==========");
+            log.info("Stream SID : {}", streamSid);
+            log.info("Call SID   : {}", state.callSid);
+            log.info("==================================");
             return;
         }
 
@@ -121,46 +94,57 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         }
 
         if ("stop".equals(event)) {
-            cleanup(streamSid);
+            log.info("STREAM STOP: {}", streamSid);
+            streams.remove(streamSid);
         }
     }
 
     private void handleMedia(String streamSid, JsonNode root) {
 
         StreamState state = streams.get(streamSid);
-        if (state == null || state.closed || state.processing) return;
-
-        if (state.justReconnected &&
-                System.currentTimeMillis() - state.connectedAt < 400) {
-            return;
-        }
-        state.justReconnected = false;
+        if (state == null || state.closed) return;
 
         String payload = root.path("media").path("payload").asText(null);
-        if (payload == null) return;
+        if (payload == null) {
+            log.warn("⚠ payload null");
+            return;
+        }
 
         byte[] frame = Base64.getDecoder().decode(payload);
+        state.framesReceived++;
+
+        int energy = 0;
+        for (byte b : frame) energy += Math.abs(b);
+        energy /= frame.length;
+
         state.buffer.write(frame, 0, frame.length);
 
-        if (isSilent(frame)) state.silenceFrames++;
+        boolean silent = energy < 8;
+        if (silent) state.silenceFrames++;
         else state.silenceFrames = 0;
 
-        if (state.silenceFrames >= SILENCE_FRAMES && state.buffer.size() >= MIN_AUDIO_BYTES) {
+        int size = state.buffer.size();
 
-            state.processing = true;
+        log.debug("frame#={} size={} energy={} silenceFrames={} buffer={}",
+                state.framesReceived, frame.length, energy, state.silenceFrames, size);
+
+        boolean silenceTrigger =
+                state.silenceFrames >= SILENCE_FRAMES && size >= MIN_AUDIO_BYTES;
+
+        boolean overflowTrigger = size >= MAX_BUFFER_BYTES;
+
+        if ((silenceTrigger || overflowTrigger) && !state.processing) {
 
             byte[] utterance = state.buffer.toByteArray();
             state.buffer.reset();
             state.silenceFrames = 0;
+            state.processing = true;
+
+            log.info("🎤 SPEECH DETECTED | bytes={} silenceTrigger={} overflow={}",
+                    utterance.length, silenceTrigger, overflowTrigger);
 
             processUtteranceAsync(streamSid, utterance, state);
         }
-    }
-
-    private boolean isSilent(byte[] frame) {
-        long sum = 0;
-        for (byte b : frame) sum += Math.abs(b);
-        return (sum / frame.length) < 6;
     }
 
     private void processUtteranceAsync(String streamSid, byte[] audio, StreamState state) {
@@ -168,136 +152,34 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         CompletableFuture.runAsync(() -> {
             try {
 
-                if (audio.length < MIN_AUDIO_BYTES || state.closed) return;
+                log.info("➡ Sending to STT | bytes={}", audio.length);
 
-                String callSid = state.callSid;
-                String from = state.fromNumber == null ? "" : state.fromNumber;
+                String text = sttService.transcribe(audio);
 
-                String userText = sttService.transcribe(audio);
-
-                if (StringUtils.isBlank(userText)) {
-                    handleSilence(state);
+                if (StringUtils.isBlank(text)) {
+                    log.warn("⚠ STT returned empty text");
                     return;
                 }
 
-                String trimmed = userText.trim().toLowerCase();
+                log.info("🧑 USER SAID: {}", text);
 
-                // 🔥 ignore noise but allow confirmations
-                if (isNoiseWord(trimmed) && !isCriticalConfirmation(trimmed)) {
-                    log.info("Ignoring probable noise word: {}", trimmed);
-                    return;
-                }
+                conversationStore.appendUser(state.callSid, "", text);
 
-                state.unclearUtterances = 0;
+                List<ChatMessage> history =
+                        conversationStore.getHistory(state.callSid);
 
-                log.info("USER | {}", trimmed);
-                conversationStore.appendUser(callSid, from, trimmed);
+                String aiReply =
+                        llmService.generateReply(state.callSid, "", history);
 
-                List<ChatMessage> history = conversationStore.getHistory(callSid);
-                List<String> summary = conversationStore.getConversationSummary(callSid);
+                log.info("🤖 AI REPLY: {}", aiReply);
 
-                Optional<String> flowReply =
-                        bookingFlowService.processUserMessage(
-                                callSid, from, trimmed, summary, openAiApiKey, openAiModel);
-
-                String aiText = flowReply.orElseGet(() ->
-                        llmService.generateReply(callSid, from, history));
-
-                if (StringUtils.isBlank(aiText)) return;
-
-                log.info("AI | {}", aiText);
-                conversationStore.appendAssistant(callSid, from, aiText);
-
-                boolean endCall =
-                        isGoodbye(trimmed, aiText)
-                                || aiText.toLowerCase().contains("appointment is confirmed")
-                                || aiText.toLowerCase().contains("you're all set");
-
-                twilioService.speakResponse(callSid, aiText, endCall);
-
-                if (endCall) {
-                    Thread.sleep(1200); // allow audio playback
-                    state.closed = true;
-                }
+                twilioService.speakResponse(state.callSid, aiReply, false);
 
             } catch (Exception e) {
-                log.error("Pipeline error", e);
+                log.error("❌ PIPELINE ERROR", e);
             } finally {
                 state.processing = false;
             }
         });
     }
-
-    private boolean isNoiseWord(String text) {
-        if (text == null) return true;
-
-        String cleaned = text.replaceAll("[^a-zA-Z]", "");
-
-        if (cleaned.isBlank()) return true;
-
-        if (cleaned.length() <= 2) return true;
-
-        if (isCriticalConfirmation(cleaned)) return false;
-
-        return cleaned.length() <= 3;
-    }
-    
-    private boolean isCriticalConfirmation(String text) {
-        if (text == null) return false;
-
-        String t = text
-                .trim()
-                .toLowerCase()
-                .replaceAll("[^a-z]", ""); // remove punctuation
-
-        return t.equals("yes")
-                || t.equals("yeah")
-                || t.equals("yep")
-                || t.equals("confirm")
-                || t.equals("correct")
-                || t.equals("right")
-                || t.equals("no")
-                || t.equals("nope")
-                || t.equals("cancel");
-    }
-
-    private void handleSilence(StreamState state) {
-        state.unclearUtterances++;
-
-        if (state.unclearUtterances <= 2) return;
-
-        String callSid = state.callSid;
-        String prompt;
-        boolean end = false;
-
-        if (state.unclearUtterances == 3) {
-            prompt = phrases.stillThere();
-        } else {
-            prompt = phrases.goodbye();
-            end = true;
-        }
-
-        conversationStore.appendAssistant(callSid, state.fromNumber, prompt);
-        twilioService.speakResponse(callSid, prompt, end);
-    }
-
-    private boolean isGoodbye(String user, String ai) {
-        String u = user.toLowerCase();
-        String a = ai.toLowerCase();
-
-        if (u.equals("bye") || u.equals("goodbye") || u.equals("thanks bye"))
-            return true;
-
-        return a.contains("take care")
-                || a.contains("have a great day")
-                || a.contains("goodbye");
-    }
-
-    private void cleanup(String streamSid) {
-        StreamState state = streams.remove(streamSid);
-        activeStreams.remove(streamSid);
-        if (state != null) state.closed = true;
-    }
-    
-    
 }

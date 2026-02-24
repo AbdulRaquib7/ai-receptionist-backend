@@ -65,10 +65,6 @@ public Optional<String> processUserMessage(
 
     PendingStateDto state = pendingByCall.get(callSid);
 
-    /* =========================================================
-       ✅ END CALL / ABORT
-       ========================================================= */
-
     if (state != null && isAbortBookingRequest(normalized)) {
         clearPending(callSid);
         return Optional.of("No problem. I've stopped the booking. Let me know if you'd like to start again.");
@@ -78,10 +74,6 @@ public Optional<String> processUserMessage(
         clearPending(callSid);
         return Optional.of(phrases.goodbye());
     }
-
-    /* =========================================================
-       ✅ HANDLE YES/NO EVEN IF SHORT
-       ========================================================= */
 
     YesNoResult yesNo = yesNoClassifier.classify(userText);
 
@@ -96,10 +88,6 @@ public Optional<String> processUserMessage(
             return Optional.of("Okay, no problem. Would you like a different time?");
         }
     }
-
-    /* =========================================================
-       ✅ HANDLE OTHER DATES REQUEST
-       ========================================================= */
 
     if (state != null
             && isOtherDatesRequest(normalized)
