@@ -64,6 +64,7 @@ public Optional<String> processUserMessage(
     String normalized = userText.toLowerCase().trim();
 
     PendingStateDto state = pendingByCall.get(callSid);
+    log.info("[{}] flow: incoming text='{}' normalized='{}'", callSid, userText, normalized);
 
     if (state != null && isAbortBookingRequest(normalized)) {
         clearPending(callSid);
@@ -127,11 +128,21 @@ public Optional<String> processUserMessage(
     }
 
     /* =========================================================
-       ✅ GENERAL QUESTION HANDLING
+       ✅ GENERAL QUESTION + INTENT EXTRACTION
        ========================================================= */
 
     ExtractedIntent extracted =
             extractIntent(userText, conversationSummary, openAiKey, openAiModel);
+
+    log.info("[{}] flow: intent='{}' general={} doctorKey={} date={} time={} name={} phone={}",
+            callSid,
+            extracted.intent,
+            extracted.isGeneralQuestion,
+            extracted.doctorKey,
+            extracted.date,
+            extracted.time,
+            extracted.patientName,
+            extracted.patientPhone);
 
     if (extracted.isGeneralQuestion) {
 
@@ -150,9 +161,11 @@ public Optional<String> processUserMessage(
 
         if ("none".equals(extracted.intent) && noBookingFields) {
             // Pure general question (weather, who is PM, etc.) – let LLM answer
+            log.info("[{}] flow: pure general question -> delegate to LLM", callSid);
             return Optional.empty();
         }
         // Otherwise, continue with booking flow using extracted fields
+        log.info("[{}] flow: general-question flag but booking fields present; continuing in flow", callSid);
     }
 
     /* =========================================================
@@ -190,6 +203,9 @@ public Optional<String> processUserMessage(
                 s.lastSuggestedDoctorKey = doctorKey;
                 s.lastSuggestedDate = d;
 
+                log.info("[{}] flow: ASK_AVAILABILITY -> nearest slot doctor={} date={} time={}",
+                        callSid, doctorKey, d, time);
+
                 return Optional.of(
                         "The nearest available slot is " + d +
                         " at " + time +
@@ -197,7 +213,50 @@ public Optional<String> processUserMessage(
             }
         }
 
+        log.info("[{}] flow: ASK_AVAILABILITY -> no available slots for doctor={}", callSid, doctorKey);
         return Optional.of("No available slots found.");
+    }
+
+    /* =========================================================
+       ✅ BOOK INTENT (CONFIRM SLOT FROM CONTEXT)
+       ========================================================= */
+
+    if ("book".equals(extracted.intent)) {
+
+        if (StringUtils.isNotBlank(extracted.doctorKey)
+                && extracted.date != null
+                && StringUtils.isNotBlank(extracted.time)) {
+
+            log.info("[{}] flow: BOOK intent -> trySetPendingBook doctor={} date={} time={}",
+                    callSid, extracted.doctorKey, extracted.date, extracted.time);
+
+            Optional<String> pending = trySetPendingBook(
+                    callSid,
+                    fromNumber,
+                    extracted.doctorKey,
+                    extracted.date,
+                    extracted.time,
+                    extracted.patientName,
+                    extracted.patientPhone);
+
+            if (pending.isPresent()) {
+                log.info("[{}] flow: BOOK intent -> pendingConfirmBook set", callSid);
+                return pending;
+            } else {
+                log.info("[{}] flow: BOOK intent -> trySetPendingBook failed validation", callSid);
+            }
+        } else {
+            log.info("[{}] flow: BOOK intent but missing doctor/date/time; continuing", callSid);
+        }
+    }
+
+    /* =========================================================
+       ✅ LIST DOCTORS
+       ========================================================= */
+
+    if ("list_doctors".equals(extracted.intent)) {
+        log.info("[{}] flow: LIST_DOCTORS intent", callSid);
+        return buildListDoctorsResponse();
     }
 
     /* =========================================================
@@ -216,6 +275,8 @@ public Optional<String> processUserMessage(
             state.pendingNeedNamePhone = false;
             state.pendingConfirmBook = true;
 
+            log.info("[{}] flow: collected name + phone -> pendingConfirmBook=true", callSid);
+
             return Optional.of(
                     phrases.confirmBookingPrompt(
                             state.doctorKey,
@@ -232,6 +293,7 @@ public Optional<String> processUserMessage(
         return Optional.of("Sorry, I didn’t catch that clearly. Could you repeat?");
     }
 
+    log.info("[{}] flow: no booking action matched -> delegate to LLM", callSid);
     return Optional.empty();
 }
 
