@@ -154,26 +154,49 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 log.info("➡ Sending to STT | bytes={}", audio.length);
 
-                String text = sttService.transcribe(audio);
+                String userText = sttService.transcribe(audio);
 
-                if (StringUtils.isBlank(text)) {
+                if (StringUtils.isBlank(userText)) {
                     log.warn("⚠ STT returned empty text");
                     return;
                 }
 
-                log.info("🧑 USER SAID: {}", text);
+                String callSid = state.callSid;
+                String fromNumber = ""; // phone is available on PSTN calls; for client calls this is fine
 
-                conversationStore.appendUser(state.callSid, "", text);
+                log.info("🧑 USER SAID: {}", userText);
 
-                List<ChatMessage> history =
-                        conversationStore.getHistory(state.callSid);
+                String trimmed = userText.trim();
+                conversationStore.appendUser(callSid, fromNumber, trimmed);
 
-                String aiReply =
-                        llmService.generateReply(state.callSid, "", history);
+                List<ChatMessage> history = conversationStore.getHistory(callSid);
+                List<String> summary = conversationStore.getConversationSummary(callSid);
 
-                log.info("🤖 AI REPLY: {}", aiReply);
+                Optional<String> flowReply =
+                        bookingFlowService.processUserMessage(
+                                callSid,
+                                fromNumber,
+                                trimmed,
+                                summary,
+                                openAiApiKey,
+                                openAiModel);
 
-                twilioService.speakResponse(state.callSid, aiReply, false);
+                String aiText = flowReply.orElseGet(() ->
+                        llmService.generateReply(callSid, fromNumber, history));
+
+                if (StringUtils.isBlank(aiText)) {
+                    log.warn("⚠ Empty AI reply");
+                    return;
+                }
+
+                log.info("🤖 AI REPLY: {}", aiText);
+                conversationStore.appendAssistant(callSid, fromNumber, aiText);
+
+                boolean endCall =
+                        aiText.toLowerCase().contains("have a good day")
+                                || aiText.toLowerCase().contains("bye.");
+
+                twilioService.speakResponse(callSid, aiText, endCall);
 
             } catch (Exception e) {
                 log.error("❌ PIPELINE ERROR", e);

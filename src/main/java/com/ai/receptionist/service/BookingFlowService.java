@@ -141,7 +141,18 @@ public Optional<String> processUserMessage(
                     "And about your appointment — shall we continue?");
         }
 
-        return Optional.empty(); // let LLM answer
+        boolean noBookingFields =
+                extracted.doctorKey == null
+                        && extracted.date == null
+                        && extracted.time == null
+                        && extracted.patientName == null
+                        && extracted.patientPhone == null;
+
+        if ("none".equals(extracted.intent) && noBookingFields) {
+            // Pure general question (weather, who is PM, etc.) – let LLM answer
+            return Optional.empty();
+        }
+        // Otherwise, continue with booking flow using extracted fields
     }
 
     /* =========================================================
