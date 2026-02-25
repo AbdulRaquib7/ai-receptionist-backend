@@ -17,75 +17,45 @@ import lombok.ToString;
 @AllArgsConstructor
 public class PendingStateDto implements Serializable {
 
-	public String doctorKey;
-	
-	public String date;
-	
-	public String time;
-	
-	public String patientName;
-	
-	public String patientPhone;
-	
-	public boolean pendingConfirmBook;
-	
-	public boolean pendingNeedNamePhone;
-	
-	public boolean pendingConfirmCancel;
-	
-	public boolean pendingConfirmReschedule;
-	
-	public boolean pendingRescheduleDetails;
-	
-	public boolean pendingChooseCancelAppointment;
-	
-	public boolean pendingChooseRescheduleAppointment;
-	
-	public String lastSuggestedDoctorKey;
-	
-	public String lastSuggestedDate;
-	
-	public boolean pendingConfirmAbort;
-		
-	public String cancelPatientName;
-	
-	public String reschedulePatientName;
-	
-	public String rescheduleDoctorKey;
-	
-	public String rescheduleDate;
-	
-	public String rescheduleTime;
-	
-	public ConversationState currentState = ConversationState.START;
-	
-	public boolean bookingLocked;
-	
-	public boolean bookingCompleted;
+    public String doctorKey;
+    public String date;
+    public String time;
 
-	public String lastSuggestedTime;
-	
-	public boolean hasAnyPending() {
-	    return pendingConfirmBook
-	            || pendingNeedNamePhone
-	            || pendingConfirmCancel
-	            || pendingConfirmReschedule
-	            || pendingRescheduleDetails
-	            || pendingChooseCancelAppointment
-	            || pendingChooseRescheduleAppointment
-	            || pendingConfirmAbort;
-	}
+    public String patientName;
+    public String patientPhone;
+    public boolean pendingNeedNamePhone;
 
-	public void clearFlowFlags() {
-	    pendingConfirmBook = false;
-	    pendingNeedNamePhone = false;
-	    pendingConfirmCancel = false;
-	    pendingConfirmReschedule = false;
-	    pendingRescheduleDetails = false;
-	    pendingChooseCancelAppointment = false;
-	    pendingChooseRescheduleAppointment = false;
-	    pendingConfirmAbort = false;
-	}
+    public boolean pendingConfirmBook;
+    public boolean pendingCancel;
 
+    public String cancelPatientName;
+    public boolean pendingReschedule;
 
+    public String reschedulePatientName;
+    public String rescheduleDoctorKey;
+    public String rescheduleDate;
+    public String rescheduleTime;
+
+    public String lastSuggestedDoctorKey;
+    public String lastSuggestedDate;
+    public String lastSuggestedTime;
+
+    public boolean bookingLocked;
+    public boolean bookingCompleted;
+
+    public ConversationState currentState = ConversationState.START;
+
+    public boolean hasAnyPending() {
+        return pendingNeedNamePhone
+                || pendingConfirmBook
+                || pendingCancel
+                || pendingReschedule;
+    }
+
+    public void clearFlowFlags() {
+        pendingNeedNamePhone = false;
+        pendingConfirmBook = false;
+        pendingCancel = false;
+        pendingReschedule = false;
+    }
 }
