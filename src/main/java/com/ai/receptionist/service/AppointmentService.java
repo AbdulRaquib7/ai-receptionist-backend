@@ -85,6 +85,7 @@ public class AppointmentService {
                 .map(a -> new AppointmentSummary(
                         a.getPatient().getName(),
                         a.getDoctor().getName(),
+                        a.getDoctor().getKey(),
                         a.getSlot().getSlotDate().toString(),
                         a.getSlot().getStartTime()
                 ))
@@ -124,6 +125,7 @@ public class AppointmentService {
         return Optional.of(new AppointmentSummary(
                 a.getPatient().getName(),
                 a.getDoctor().getName(),
+                a.getDoctor().getKey(),
                 a.getSlot().getSlotDate().toString(),
                 a.getSlot().getStartTime()));
     }
@@ -148,12 +150,14 @@ public class AppointmentService {
     public static class AppointmentSummary {
         public final String patientName;
         public final String doctorName;
+        public final String doctorKey;
         public final String slotDate;
         public final String startTime;
 
-        public AppointmentSummary(String patientName, String doctorName, String slotDate, String startTime) {
+        public AppointmentSummary(String patientName, String doctorName, String doctorKey, String slotDate, String startTime) {
             this.patientName = patientName;
             this.doctorName = doctorName;
+            this.doctorKey = doctorKey;
             this.slotDate = slotDate;
             this.startTime = startTime;
         }

@@ -30,6 +30,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
+    /** Persists callSid -> fromNumber across multiple stream segments within the same call */
+    private final Map<String, String> callFromNumbers = new ConcurrentHashMap<>();
 
     private final SttService sttService;
     private final LlmService llmService;
@@ -66,6 +68,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         boolean processing = false;
         boolean closed = false;
         String callSid;
+        String fromNumber = "";
         long framesReceived = 0;
     }
 
@@ -79,11 +82,21 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         if ("start".equals(event)) {
             StreamState state = new StreamState();
             state.callSid = root.path("start").path("callSid").asText("");
+            // Extract caller's phone number passed as a custom parameter from TwiML
+            String fromParam = root.path("start").path("customParameters").path("From").asText("");
+            if (!fromParam.isBlank()) {
+                state.fromNumber = fromParam;
+                callFromNumbers.put(state.callSid, fromParam);
+            } else {
+                // Reuse fromNumber from a previous stream segment of the same call
+                state.fromNumber = callFromNumbers.getOrDefault(state.callSid, "");
+            }
             streams.put(streamSid, state);
 
             log.info("========== STREAM START ==========");
             log.info("Stream SID : {}", streamSid);
             log.info("Call SID   : {}", state.callSid);
+            log.info("From       : {}", state.fromNumber.isBlank() ? "(test/anonymous)" : state.fromNumber);
             log.info("==================================");
             return;
         }
@@ -95,7 +108,16 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
         if ("stop".equals(event)) {
             log.info("STREAM STOP: {}", streamSid);
-            streams.remove(streamSid);
+            StreamState stopped = streams.remove(streamSid);
+            // Only clean up the callSid mapping when no more streams exist for this call
+            if (stopped != null && !callFromNumbers.isEmpty()) {
+                boolean hasOtherStreams = streams.values().stream()
+                        .anyMatch(s -> stopped.callSid.equals(s.callSid));
+                if (!hasOtherStreams) {
+                    callFromNumbers.remove(stopped.callSid);
+                    bookingFlowService.clearPending(stopped.callSid);
+                }
+            }
         }
     }
 
@@ -162,7 +184,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 }
 
                 String callSid = state.callSid;
-                String fromNumber = ""; // phone is available on PSTN calls; for client calls this is fine
+                String fromNumber = state.fromNumber;
 
                 log.info("🧑 USER SAID: {}", userText);
 
