@@ -1,7 +1,9 @@
 package com.ai.receptionist.dto;
 
 import java.io.Serializable;
+import java.util.List;
 
+import com.ai.receptionist.service.AppointmentService;
 import com.ai.receptionist.utils.ConversationState;
 
 import lombok.AllArgsConstructor;
@@ -42,6 +44,13 @@ public class PendingStateDto implements Serializable {
 
     public boolean bookingLocked;
     public boolean bookingCompleted;
+    
+    public boolean pendingAppointmentSelection;
+    public boolean selectionForCancel;
+    public boolean selectionForReschedule;
+
+    public List<AppointmentService.AppointmentSummary> selectionList;
+    public String selectedPatientName;
 
     public ConversationState currentState = ConversationState.START;
 

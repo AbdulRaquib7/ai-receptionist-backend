@@ -61,7 +61,12 @@ public class BookingFlowService {
 		PendingStateDto state = pendingByCall.get(callSid);
 
 		log.info("[{}] incoming='{}'", callSid, userText);
-		
+
+		/*
+		 * ---------------------------------- STOP / END CALL
+		 * ----------------------------------
+		 */
+
 		if (state != null && isAbortBookingRequest(normalized)) {
 			clearPending(callSid);
 			return Optional.of("No problem. I've stopped the booking.");
@@ -74,10 +79,25 @@ public class BookingFlowService {
 
 		YesNoResult yesNo = yesNoClassifier.classify(userText);
 
+		/*
+		 * ---------------------------------- HANDLE APPOINTMENT SELECTION
+		 * ----------------------------------
+		 */
+
+		Optional<String> selectionResponse = handleAppointmentSelection(callSid, userText);
+
+		if (selectionResponse.isPresent())
+			return selectionResponse;
+
+		/*
+		 * ---------------------------------- CONFIRM CANCEL
+		 * ----------------------------------
+		 */
+
 		if (state != null && state.pendingCancel) {
 
 			if (yesNo == YesNoResult.YES) {
-				return confirmCancel(callSid, fromNumber, state.cancelPatientName);
+				return confirmCancel(callSid, fromNumber, state.selectedPatientName);
 			}
 
 			if (yesNo == YesNoResult.NO) {
@@ -86,85 +106,82 @@ public class BookingFlowService {
 			}
 		}
 
+		/*
+		 * ---------------------------------- CONFIRM BOOKING
+		 * ----------------------------------
+		 */
+
 		if (state != null && state.pendingConfirmBook) {
 
-			if (yesNo == YesNoResult.YES) {
+			if (yesNo == YesNoResult.YES)
 				return confirmBook(callSid, fromNumber, state);
-			}
 
 			if (yesNo == YesNoResult.NO) {
 				state.pendingConfirmBook = false;
-				return Optional.of("Okay, no problem. Would you like a different time?");
+				return Optional.of("Okay, would you like a different time?");
 			}
 		}
 
-		if (state != null && isOtherDatesRequest(normalized) && state.lastSuggestedDoctorKey != null) {
+		/*
+		 * ---------------------------------- RESCHEDULE SLOT COLLECTION
+		 * ----------------------------------
+		 */
 
-			Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
+		if (state != null && state.pendingReschedule) {
 
-			Map<String, List<String>> byDate = slots.get(state.lastSuggestedDoctorKey);
+			ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
-			if (byDate == null || byDate.isEmpty())
-				return Optional.of("No other dates available.");
+			if (extracted.date != null && extracted.time != null) {
 
-			List<String> dates = new ArrayList<>(byDate.keySet());
-			dates.sort(Comparator.comparing(LocalDate::parse));
+				state.rescheduleDate = extracted.date;
+				state.rescheduleTime = extracted.time;
+				state.rescheduleDoctorKey = extracted.doctorKey != null ? extracted.doctorKey : state.doctorKey;
 
-			dates.remove(state.lastSuggestedDate);
-
-			if (dates.isEmpty())
-				return Optional.of("That's the only available date.");
-
-			return Optional.of("We also have " + String.join(" and ", dates) + ". Which works for you?");
-		}
-		
-		if (isLikelyForeignOrUnclearText(userText)) {
-			return Optional.of(phrases.unclearAskAgain());
-		}
-
-		ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
-
-		log.info("[{}] intent={} doctor={} date={} time={}", callSid, extracted.intent, extracted.doctorKey,
-				extracted.date, extracted.time);
-
-		if (state != null && state.pendingReschedule && extracted.date != null && extracted.time != null) {
-
-			state.rescheduleDate = extracted.date;
-			state.rescheduleTime = extracted.time;
-			state.rescheduleDoctorKey = extracted.doctorKey != null ? extracted.doctorKey : state.doctorKey;
-
-			return confirmReschedule(callSid, fromNumber, state);
-		}
-
-		if (state != null && state.pendingReschedule && (extracted.date == null || extracted.time == null)) {
+				return confirmReschedule(callSid, fromNumber, state);
+			}
 
 			return Optional.of("What new date and time would you like?");
 		}
-		
+
+		/*
+		 * ---------------------------------- UNCLEAR TEXT
+		 * ----------------------------------
+		 */
+
+		if (isLikelyForeignOrUnclearText(userText))
+			return Optional.of(phrases.unclearAskAgain());
+
+		/*
+		 * ---------------------------------- INTENT EXTRACTION
+		 * ----------------------------------
+		 */
+
+		ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
+
+		log.info("[{}] intent={}", callSid, extracted.intent);
+
+		/*
+		 * ---------------------------------- CANCEL FLOW (MULTI-APPOINTMENT)
+		 * ----------------------------------
+		 */
+
 		if ("cancel".equals(extracted.intent)) {
-
-			PendingStateDto s = getOrCreate(callSid);
-			s.pendingCancel = true;
-
-			if (extracted.patientName != null) {
-				s.cancelPatientName = extracted.patientName;
-			}
-
-			state = s; // refresh state
-
-			return Optional.of("Are you sure you want to cancel your appointment? Please say yes or no.");
+			return askWhichAppointment(callSid, fromNumber, true);
 		}
+
+		/*
+		 * ---------------------------------- RESCHEDULE FLOW (MULTI-APPOINTMENT)
+		 * ----------------------------------
+		 */
 
 		if ("reschedule".equals(extracted.intent)) {
-
-			PendingStateDto s = getOrCreate(callSid);
-			s.pendingReschedule = true;
-			s.reschedulePatientName = extracted.patientName;
-
-			state = s;
-
-			return Optional.of("Sure. What new date and time would you prefer?");
+			return askWhichAppointment(callSid, fromNumber, false);
 		}
+
+		/*
+		 * ---------------------------------- AVAILABILITY
+		 * ----------------------------------
+		 */
 
 		if ("ask_availability".equals(extracted.intent)) {
 
@@ -173,33 +190,39 @@ public class BookingFlowService {
 			if (slots.isEmpty())
 				return Optional.of("No slots available right now.");
 
-			String doctorKey = extracted.doctorKey;
-
-			if (doctorKey == null)
+			if (extracted.doctorKey == null)
 				return Optional.of("Which doctor would you like me to check?");
 
-			Map<String, List<String>> byDate = slots.get(doctorKey);
+			Map<String, List<String>> byDate = slots.get(extracted.doctorKey);
 
 			if (byDate == null || byDate.isEmpty())
 				return Optional.of("No availability found.");
 
-			String firstDate = byDate.keySet().iterator().next();
-			String firstTime = byDate.get(firstDate).get(0);
+			String date = byDate.keySet().iterator().next();
+			String time = byDate.get(date).get(0);
 
 			PendingStateDto s = getOrCreate(callSid);
-			s.lastSuggestedDoctorKey = doctorKey;
-			s.lastSuggestedDate = firstDate;
+			s.lastSuggestedDoctorKey = extracted.doctorKey;
+			s.lastSuggestedDate = date;
 
-			return Optional
-					.of("The nearest available slot is " + firstDate + " at " + firstTime + ". Would that work?");
+			return Optional.of("The nearest available slot is " + date + " at " + time + ". Would that work?");
 		}
-		
+
+		/*
+		 * ---------------------------------- BOOK ----------------------------------
+		 */
+
 		if ("book".equals(extracted.intent) && extracted.doctorKey != null && extracted.date != null
 				&& extracted.time != null) {
 
 			return trySetPendingBook(callSid, fromNumber, extracted.doctorKey, extracted.date, extracted.time,
 					extracted.patientName, extracted.patientPhone);
 		}
+
+		/*
+		 * ---------------------------------- COLLECT NAME & PHONE
+		 * ----------------------------------
+		 */
 
 		if (state != null && state.pendingNeedNamePhone) {
 
@@ -217,146 +240,126 @@ public class BookingFlowService {
 			}
 		}
 
-		if (state != null && state.hasAnyPending()) {
+		/*
+		 * ---------------------------------- STILL WAITING
+		 * ----------------------------------
+		 */
+
+		if (state != null && state.hasAnyPending())
 			return Optional.of("Sorry, could you repeat that?");
-		}
 
 		return Optional.empty();
 	}
 
 	private Optional<String> confirmBook(String callSid, String fromNumber, PendingStateDto state) {
 
-	    if (!state.pendingConfirmBook) {
-	        throw new IllegalStateException("Booking attempted without confirmation.");
-	    }
+		if (!state.pendingConfirmBook) {
+			throw new IllegalStateException("Booking attempted without confirmation.");
+		}
 
-	    if (state.bookingLocked) {
-	        return Optional.of("You're all set! Your appointment is confirmed for "
-	                + state.date + " at " + state.time
-	                + ". We'll see you then. Take care!");
-	    }
+		if (state.bookingLocked) {
+			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
+					+ ". We'll see you then. Take care!");
+		}
 
-	    if (StringUtils.isBlank(state.doctorKey)
-	            || state.date == null
-	            || StringUtils.isBlank(state.time)) {
+		if (StringUtils.isBlank(state.doctorKey) || state.date == null || StringUtils.isBlank(state.time)) {
 
-	        clearPending(callSid);
-	        return Optional.of("I don't have the full booking details. Let's try again.");
-	    }
+			clearPending(callSid);
+			return Optional.of("I don't have the full booking details. Let's try again.");
+		}
 
-	    String twilioPhone = fromNumber;
+		String twilioPhone = fromNumber;
 
-	    boolean invalidCaller =
-	            twilioPhone == null
-	            || twilioPhone.isBlank()
-	            || twilioPhone.startsWith("client:")
-	            || twilioPhone.equalsIgnoreCase("anonymous")
-	            || twilioPhone.equalsIgnoreCase("unknown");
+		boolean invalidCaller = twilioPhone == null || twilioPhone.isBlank() || twilioPhone.startsWith("client:")
+				|| twilioPhone.equalsIgnoreCase("anonymous") || twilioPhone.equalsIgnoreCase("unknown");
 
-	    if (invalidCaller) {
+		if (invalidCaller) {
 
-	        log.warn("[{}] Twilio test call detected. No real caller number.", callSid);
+			log.warn("[{}] Twilio test call detected. No real caller number.", callSid);
 
-	        if (StringUtils.isNotBlank(state.patientPhone)) {
-	            twilioPhone = state.patientPhone;
-	        } else {
-	            twilioPhone = "+10000000000";
-	        }
-	    }
-	    log.info("tiwlio phone:{}",twilioPhone);
+			if (StringUtils.isNotBlank(state.patientPhone)) {
+				twilioPhone = state.patientPhone;
+			} else {
+				twilioPhone = "+10000000000";
+			}
+		}
+		log.info("tiwlio phone:{}", twilioPhone);
 
-	    Optional<Appointment> result =
-	            appointmentService.bookAppointment(
-	                    twilioPhone,
-	                    state.patientName,
-	                    state.patientPhone,
-	                    state.doctorKey,
-	                    state.date,
-	                    state.time);
+		Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName,
+				state.patientPhone, state.doctorKey, state.date, state.time);
 
-	    if (result.isPresent()) {
-	        state.bookingLocked = true;
-	        state.bookingCompleted = true;
-	        state.currentState = ConversationState.COMPLETED;
+		if (result.isPresent()) {
+			state.bookingLocked = true;
+			state.bookingCompleted = true;
+			state.currentState = ConversationState.COMPLETED;
 
-	        log.info("Booked appointment for callSid={} doctor={} date={} time={}",
-	                callSid, state.doctorKey, state.date, state.time);
+			log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey,
+					state.date, state.time);
 
-	        return Optional.of("You're all set! Your appointment is confirmed for "
-	                + state.date + " at " + state.time
-	                + ". We'll see you then. Take care!");
-	    }
+			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
+					+ ". We'll see you then. Take care!");
+		}
 
-	    return Optional.of(phrases.slotUnavailable());
+		return Optional.of(phrases.slotUnavailable());
 	}
 
 	private Optional<String> confirmCancel(String callSid, String fromNumber, String patientName) {
 
-	    String callerPhone = resolveCallerPhone(fromNumber, null);
+		String callerPhone = resolveCallerPhone(fromNumber, null);
 
-	    boolean ok = appointmentService.cancelAppointment(callerPhone, patientName);
+		boolean ok = appointmentService.cancelAppointment(callerPhone, patientName);
 
-	    clearPending(callSid);
+		clearPending(callSid);
 
-	    if (ok) {
-	        return Optional.of(phrases.cancelConfirmed());
-	    }
+		if (ok) {
+			return Optional.of(phrases.cancelConfirmed());
+		}
 
-	    return Optional.of("I couldn't find an appointment to cancel.");
+		return Optional.of("I couldn't find an appointment to cancel.");
 	}
-	
+
 	private String resolveCallerPhone(String fromNumber, PendingStateDto state) {
 
-	    String phone = fromNumber;
+		String phone = fromNumber;
 
-	    boolean invalidCaller =
-	            phone == null ||
-	            phone.isBlank() ||
-	            phone.startsWith("client:") ||
-	            phone.equalsIgnoreCase("anonymous") ||
-	            phone.equalsIgnoreCase("unknown");
+		boolean invalidCaller = phone == null || phone.isBlank() || phone.startsWith("client:")
+				|| phone.equalsIgnoreCase("anonymous") || phone.equalsIgnoreCase("unknown");
 
-	    if (invalidCaller) {
+		if (invalidCaller) {
 
-	        log.warn("Twilio test caller detected");
+			log.warn("Twilio test caller detected");
 
-	        if (state != null && StringUtils.isNotBlank(state.patientPhone)) {
-	            return state.patientPhone;
-	        }
+			if (state != null && StringUtils.isNotBlank(state.patientPhone)) {
+				return state.patientPhone;
+			}
 
-	        return "+10000000000"; 
-	    }
+			return "+10000000000";
+		}
 
-	    return phone;
+		return phone;
 	}
 
 	private Optional<String> confirmReschedule(String callSid, String fromNumber, PendingStateDto state) {
 
-	    if (StringUtils.isBlank(state.rescheduleDoctorKey)
-	            || state.rescheduleDate == null
-	            || StringUtils.isBlank(state.rescheduleTime)) {
+		if (StringUtils.isBlank(state.rescheduleDoctorKey) || state.rescheduleDate == null
+				|| StringUtils.isBlank(state.rescheduleTime)) {
 
-	        clearPending(callSid);
-	        return Optional.of("I don't have the new slot. Let's try again.");
-	    }
+			clearPending(callSid);
+			return Optional.of("I don't have the new slot. Let's try again.");
+		}
 
-	    String callerPhone = resolveCallerPhone(fromNumber, state);
+		String callerPhone = resolveCallerPhone(fromNumber, state);
 
-	    Optional<Appointment> result =
-	            appointmentService.rescheduleAppointment(
-	                    callerPhone,
-	                    state.reschedulePatientName,
-	                    state.rescheduleDoctorKey,
-	                    state.rescheduleDate,
-	                    state.rescheduleTime);
+		Optional<Appointment> result = appointmentService.rescheduleAppointment(callerPhone,
+				state.reschedulePatientName, state.rescheduleDoctorKey, state.rescheduleDate, state.rescheduleTime);
 
-	    clearPending(callSid);
+		clearPending(callSid);
 
-	    if (result.isPresent()) {
-	        return Optional.of(phrases.rescheduleConfirmed());
-	    }
+		if (result.isPresent()) {
+			return Optional.of(phrases.rescheduleConfirmed());
+		}
 
-	    return Optional.of("I couldn't find your existing appointment. Would you like to book a new one?");
+		return Optional.of("I couldn't find your existing appointment. Would you like to book a new one?");
 	}
 
 	private boolean wantsToEndCall(String normalized) {
@@ -402,13 +405,13 @@ public class BookingFlowService {
 
 		return null;
 	}
-	
+
 	private String normalizeAppointmentTypo(String userText) {
 		if (userText == null || userText.isEmpty())
 			return userText;
 		return userText.replaceAll("(?i)\\bapartment\\b", "appointment");
 	}
-	
+
 	private boolean isLikelyForeignOrUnclearText(String text) {
 		if (text == null || text.isBlank())
 			return false;
@@ -421,22 +424,16 @@ public class BookingFlowService {
 		boolean noLatinLetters = !text.matches(".*[A-Za-z].*");
 		return (nonAscii > 0 && nonAscii * 2 >= len) || noLatinLetters;
 	}
-	
+
 	private boolean isAbortBookingRequest(String text) {
-		if (text == null) return false;
+		if (text == null)
+			return false;
 
 		String n = text.toLowerCase().replace("'", "");
 
-		return n.contains("cancel process")
-				|| n.contains("cancel booking")
-				|| n.contains("cancel this")
-				|| n.contains("stop booking")
-				|| n.contains("stop this")
-				|| n.contains("never mind")
-				|| n.contains("forget it")
-				|| n.contains("leave it")
-				|| n.contains("abort")
-				|| n.equals("cancel")
+		return n.contains("cancel process") || n.contains("cancel booking") || n.contains("cancel this")
+				|| n.contains("stop booking") || n.contains("stop this") || n.contains("never mind")
+				|| n.contains("forget it") || n.contains("leave it") || n.contains("abort") || n.equals("cancel")
 				|| n.equals("stop");
 	}
 
@@ -514,7 +511,7 @@ public class BookingFlowService {
 	private static String nullIfEmpty(String s) {
 		return s == null || s.isBlank() ? null : s.trim();
 	}
-	
+
 	static class ExtractedIntent {
 		String intent;
 		boolean isGeneralQuestion;
@@ -525,86 +522,71 @@ public class BookingFlowService {
 		String patientPhone;
 	}
 
-	public Optional<String> trySetPendingBook(
-	        String callSid,
-	        String fromNumber,
-	        String doctorKey,
-	        String date,
-	        String time,
-	        String name,
-	        String phone) {
+	public Optional<String> trySetPendingBook(String callSid, String fromNumber, String doctorKey, String date,
+			String time, String name, String phone) {
 
-	    log.info("[{}] trySetPendingBook doctor={} date={} time={}",
-	            callSid, doctorKey, date, time);
+		log.info("[{}] trySetPendingBook doctor={} date={} time={}", callSid, doctorKey, date, time);
 
-	    String d = normalizeDate(date);
-	    if (d == null) {
-	        log.warn("[{}] Invalid date {}", callSid, date);
-	        return Optional.empty();
-	    }
+		String d = normalizeDate(date);
+		if (d == null) {
+			log.warn("[{}] Invalid date {}", callSid, date);
+			return Optional.empty();
+		}
 
-	    Map<String, Map<String, List<String>>> available =
-	            appointmentService.getAvailableSlotsForNextWeek();
+		Map<String, Map<String, List<String>>> available = appointmentService.getAvailableSlotsForNextWeek();
 
-	    if (!available.containsKey(doctorKey)) {
-	        log.warn("[{}] Doctor not found {}", callSid, doctorKey);
-	        return Optional.empty();
-	    }
+		if (!available.containsKey(doctorKey)) {
+			log.warn("[{}] Doctor not found {}", callSid, doctorKey);
+			return Optional.empty();
+		}
 
-	    List<String> times = available.get(doctorKey).get(d);
+		List<String> times = available.get(doctorKey).get(d);
 
-	    if (times == null || !times.contains(time)) {
-	        log.warn("[{}] Time not available {} {}", callSid, d, time);
-	        return Optional.empty();
-	    }
+		if (times == null || !times.contains(time)) {
+			log.warn("[{}] Time not available {} {}", callSid, d, time);
+			return Optional.empty();
+		}
 
-	    PendingStateDto s = getOrCreate(callSid);
-	    s.doctorKey = doctorKey;
-	    s.date = d;
-	    s.time = time;
+		PendingStateDto s = getOrCreate(callSid);
+		s.doctorKey = doctorKey;
+		s.date = d;
+		s.time = time;
 
-	    if (StringUtils.isNotBlank(name))
-	        s.patientName = name;
+		if (StringUtils.isNotBlank(name))
+			s.patientName = name;
 
-	    if (StringUtils.isNotBlank(phone))
-	        s.patientPhone = phone;
+		if (StringUtils.isNotBlank(phone))
+			s.patientPhone = phone;
 
-	    if (StringUtils.isBlank(s.patientName)
-	            || StringUtils.isBlank(s.patientPhone)) {
+		if (StringUtils.isBlank(s.patientName) || StringUtils.isBlank(s.patientPhone)) {
 
-	        s.pendingNeedNamePhone = true;
-	        s.pendingConfirmBook = false;
+			s.pendingNeedNamePhone = true;
+			s.pendingConfirmBook = false;
 
-	        log.info("[{}] Need patient name/phone before confirmation", callSid);
+			log.info("[{}] Need patient name/phone before confirmation", callSid);
 
-	        if (StringUtils.isBlank(s.patientName)
-	                && StringUtils.isBlank(s.patientPhone)) {
+			if (StringUtils.isBlank(s.patientName) && StringUtils.isBlank(s.patientPhone)) {
 
-	            return Optional.of(
-	                    "May I have your name and contact number?");
-	        }
+				return Optional.of("May I have your name and contact number?");
+			}
 
-	        if (StringUtils.isBlank(s.patientName)) {
-	            return Optional.of("May I have your name?");
-	        }
+			if (StringUtils.isBlank(s.patientName)) {
+				return Optional.of("May I have your name?");
+			}
 
-	        return Optional.of("May I have your contact number?");
-	    }
+			return Optional.of("May I have your contact number?");
+		}
 
-	    s.pendingNeedNamePhone = false;
-	    s.pendingConfirmBook = true;
+		s.pendingNeedNamePhone = false;
+		s.pendingConfirmBook = true;
 
-	    log.info("[{}] Pending confirmation ready", callSid);
+		log.info("[{}] Pending confirmation ready", callSid);
 
-	    List<Doctor> doctors = appointmentService.getAllDoctors();
-	    String docName = doctors.stream()
-	            .filter(doc -> doc.getKey().equals(doctorKey))
-	            .findFirst()
-	            .map(Doctor::getName)
-	            .orElse(doctorKey);
+		List<Doctor> doctors = appointmentService.getAllDoctors();
+		String docName = doctors.stream().filter(doc -> doc.getKey().equals(doctorKey)).findFirst().map(Doctor::getName)
+				.orElse(doctorKey);
 
-	    return Optional.of(
-	            phrases.confirmBookingPrompt(docName, d, time));
+		return Optional.of(phrases.confirmBookingPrompt(docName, d, time));
 	}
 
 	private boolean isOtherDatesRequest(String text) {
@@ -615,6 +597,102 @@ public class BookingFlowService {
 
 		return t.contains("other date") || t.contains("another date") || t.contains("any other date")
 				|| t.contains("different date") || t.contains("next date");
+	}
+
+	private Optional<String> askWhichAppointment(String callSid, String fromNumber, boolean forCancel) {
+
+		PendingStateDto state = getOrCreate(callSid);
+		String phone = resolveCallerPhone(fromNumber, state);
+
+		List<AppointmentService.AppointmentSummary> appts = appointmentService.getUpcomingAppointmentSummaries(phone);
+
+		if (appts.isEmpty()) {
+			return Optional.of("You don't have any upcoming appointments.");
+		}
+
+		if (appts.size() == 1) {
+			AppointmentService.AppointmentSummary a = appts.get(0);
+
+			if (forCancel) {
+				state.pendingCancel = true;
+			} else {
+				state.pendingReschedule = true;
+			}
+
+			state.selectedPatientName = a.patientName;
+
+			return Optional.of("You have an appointment for " + a.patientName + " with " + a.doctorName + " on "
+					+ a.slotDate + " at " + a.startTime + ". Should I proceed?");
+		}
+
+		state.pendingAppointmentSelection = true;
+		state.selectionForCancel = forCancel;
+		state.selectionForReschedule = !forCancel;
+		state.selectionList = appts;
+
+		StringBuilder msg = new StringBuilder("I found these upcoming appointments: ");
+
+		for (int i = 0; i < appts.size(); i++) {
+			AppointmentService.AppointmentSummary a = appts.get(i);
+			msg.append(i + 1).append(". ").append(a.patientName).append(" with ").append(a.doctorName).append(" on ")
+					.append(a.slotDate).append(" at ").append(a.startTime);
+
+			if (i < appts.size() - 1)
+				msg.append(", ");
+		}
+
+		msg.append(". Which one would you like? You can say the number or the name.");
+
+		return Optional.of(msg.toString());
+	}
+
+	private Optional<String> handleAppointmentSelection(String callSid, String userText) {
+
+		PendingStateDto state = getOrCreate(callSid);
+
+		if (!state.pendingAppointmentSelection || state.selectionList == null)
+			return Optional.empty();
+
+		String text = userText.toLowerCase();
+
+		AppointmentService.AppointmentSummary selected = null;
+
+		// check number selection
+		for (int i = 0; i < state.selectionList.size(); i++) {
+			if (text.contains(String.valueOf(i + 1))) {
+				selected = state.selectionList.get(i);
+				break;
+			}
+		}
+
+		// check name selection
+		if (selected == null) {
+			for (AppointmentService.AppointmentSummary a : state.selectionList) {
+				if (text.contains(a.patientName.toLowerCase())) {
+					selected = a;
+					break;
+				}
+			}
+		}
+
+		if (selected == null) {
+			return Optional.of("Sorry, I didn't catch which appointment. Please say the number or the patient name.");
+		}
+
+		state.selectedPatientName = selected.patientName;
+		state.pendingAppointmentSelection = false;
+
+		if (state.selectionForCancel) {
+			state.pendingCancel = true;
+			return Optional.of("Do you want to cancel the appointment for " + selected.patientName + "?");
+		}
+
+		if (state.selectionForReschedule) {
+			state.pendingReschedule = true;
+			return Optional.of("What new date and time would you like?");
+		}
+
+		return Optional.empty();
 	}
 
 }
