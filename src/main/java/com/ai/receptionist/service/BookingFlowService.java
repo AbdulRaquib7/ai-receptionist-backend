@@ -62,11 +62,6 @@ public class BookingFlowService {
 
 		log.info("[{}] incoming='{}'", callSid, userText);
 
-		/*
-		 * ---------------------------------- STOP / END CALL
-		 * ----------------------------------
-		 */
-
 		if (state != null && isAbortBookingRequest(normalized)) {
 			clearPending(callSid);
 			return Optional.of("No problem. I've stopped the booking.");
@@ -79,21 +74,11 @@ public class BookingFlowService {
 
 		YesNoResult yesNo = yesNoClassifier.classify(userText);
 
-		/*
-		 * ---------------------------------- HANDLE APPOINTMENT SELECTION
-		 * ----------------------------------
-		 */
-
 		Optional<String> selectionResponse = handleAppointmentSelection(callSid, userText);
 
 		if (selectionResponse.isPresent())
 			return selectionResponse;
-
-		/*
-		 * ---------------------------------- CONFIRM CANCEL
-		 * ----------------------------------
-		 */
-
+		
 		if (state != null && state.pendingCancel) {
 
 			if (yesNo == YesNoResult.YES) {
@@ -105,12 +90,7 @@ public class BookingFlowService {
 				return Optional.of("Okay, your appointment remains scheduled.");
 			}
 		}
-
-		/*
-		 * ---------------------------------- CONFIRM BOOKING
-		 * ----------------------------------
-		 */
-
+		
 		if (state != null && state.pendingConfirmBook) {
 
 			if (yesNo == YesNoResult.YES)
@@ -121,11 +101,6 @@ public class BookingFlowService {
 				return Optional.of("Okay, would you like a different time?");
 			}
 		}
-
-		/*
-		 * ---------------------------------- RESCHEDULE SLOT COLLECTION
-		 * ----------------------------------
-		 */
 
 		if (state != null && state.pendingReschedule) {
 
@@ -143,27 +118,11 @@ public class BookingFlowService {
 			return Optional.of("What new date and time would you like?");
 		}
 
-		/*
-		 * ---------------------------------- UNCLEAR TEXT
-		 * ----------------------------------
-		 */
-
 		if (isLikelyForeignOrUnclearText(userText))
 			return Optional.of(phrases.unclearAskAgain());
-
-		/*
-		 * ---------------------------------- INTENT EXTRACTION
-		 * ----------------------------------
-		 */
-
 		ExtractedIntent extracted = extractIntent(userText, conversationSummary, openAiKey, openAiModel);
 
 		log.info("[{}] intent={}", callSid, extracted.intent);
-
-		/*
-		 * ---------------------------------- CHECK APPOINTMENTS
-		 * ----------------------------------
-		 */
 
 		if ("check_appointments".equals(extracted.intent)) {
 			PendingStateDto s = getOrCreate(callSid);
@@ -280,11 +239,6 @@ public class BookingFlowService {
 			}
 		}
 
-		/*
-		 * ---------------------------------- STILL WAITING
-		 * ----------------------------------
-		 */
-
 		if (state != null && state.hasAnyPending())
 			return Optional.of("Sorry, could you repeat that?");
 
@@ -293,54 +247,52 @@ public class BookingFlowService {
 
 	private Optional<String> confirmBook(String callSid, String fromNumber, PendingStateDto state) {
 
-		if (!state.pendingConfirmBook) {
-			throw new IllegalStateException("Booking attempted without confirmation.");
-		}
+	    if (!state.pendingConfirmBook) {
+	        throw new IllegalStateException("Booking attempted without confirmation.");
+	    }
 
-		if (state.bookingLocked) {
-			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
-					+ ". We'll see you then. Take care!");
-		}
+	    if (state.bookingLocked) {
+	        return Optional.of(
+	                "You're all set! Your appointment is confirmed for "
+	                        + state.date + " at " + state.time
+	                        + ". We'll see you then.");
+	    }
 
-		if (StringUtils.isBlank(state.doctorKey) || state.date == null || StringUtils.isBlank(state.time)) {
+	    if (StringUtils.isBlank(state.doctorKey)
+	            || state.date == null
+	            || StringUtils.isBlank(state.time)) {
 
-			clearPending(callSid);
-			return Optional.of("I don't have the full booking details. Let's try again.");
-		}
+	        clearPending(callSid);
+	        return Optional.of("I don't have the full booking details. Let's try again.");
+	    }
 
-		String twilioPhone = fromNumber;
+	    // ⭐ ALWAYS resolve caller identity
+	    String twilioPhone = resolveCallerPhone(fromNumber, state);
 
-		boolean invalidCaller = twilioPhone == null || twilioPhone.isBlank() || twilioPhone.startsWith("client:")
-				|| twilioPhone.equalsIgnoreCase("anonymous") || twilioPhone.equalsIgnoreCase("unknown");
+	    log.info("Resolved caller phone: {}", twilioPhone);
 
-		if (invalidCaller) {
+	    Optional<Appointment> result =
+	            appointmentService.bookAppointment(
+	                    twilioPhone,             
+	                    state.patientName,
+	                    state.patientPhone,      
+	                    state.doctorKey,
+	                    state.date,
+	                    state.time);
 
-			log.warn("[{}] Twilio test call detected. No real caller number.", callSid);
+	    if (result.isPresent()) {
 
-			if (StringUtils.isNotBlank(state.patientPhone)) {
-				twilioPhone = state.patientPhone;
-			} else {
-				twilioPhone = "+10000000000";
-			}
-		}
-		log.info("tiwlio phone:{}", twilioPhone);
+	        state.bookingLocked = true;
+	        state.bookingCompleted = true;
+	        state.currentState = ConversationState.COMPLETED;
 
-		Optional<Appointment> result = appointmentService.bookAppointment(twilioPhone, state.patientName,
-				state.patientPhone, state.doctorKey, state.date, state.time);
+	        return Optional.of(
+	                "You're all set! Your appointment is confirmed for "
+	                        + state.date + " at " + state.time
+	                        + ". We'll see you then.");
+	    }
 
-		if (result.isPresent()) {
-			state.bookingLocked = true;
-			state.bookingCompleted = true;
-			state.currentState = ConversationState.COMPLETED;
-
-			log.info("Booked appointment for callSid={} doctor={} date={} time={}", callSid, state.doctorKey,
-					state.date, state.time);
-
-			return Optional.of("You're all set! Your appointment is confirmed for " + state.date + " at " + state.time
-					+ ". We'll see you then. Take care!");
-		}
-
-		return Optional.of(phrases.slotUnavailable());
+	    return Optional.of(phrases.slotUnavailable());
 	}
 
 	private Optional<String> confirmCancel(String callSid, String fromNumber, String patientName) {
