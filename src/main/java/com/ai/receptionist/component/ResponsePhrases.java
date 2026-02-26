@@ -36,7 +36,7 @@ public class ResponsePhrases {
     }
 
     public String cancelConfirmed() {
-        return "Alright, it's cancelled. Let us know if you need anything else.";
+        return "Alright, it's cancelled. Is there anything else I can help you with?";
     }
 
     public String noAppointmentsToReschedule() {

@@ -23,9 +23,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
-    private static final int SILENCE_FRAMES = 18;
-    private static final int MIN_AUDIO_BYTES = 12000;
-    private static final int MAX_BUFFER_BYTES = 32000;
+    private static final int SILENCE_FRAMES = 25;
+    private static final int MIN_AUDIO_BYTES = 16000;
+    private static final int MAX_BUFFER_BYTES = 64000;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -109,16 +109,41 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         if ("stop".equals(event)) {
             log.info("STREAM STOP: {}", streamSid);
             StreamState stopped = streams.remove(streamSid);
-            // Only clean up the callSid mapping when no more streams exist for this call
-            if (stopped != null && !callFromNumbers.isEmpty()) {
+            // Only clean up the callSid->fromNumber mapping when no more streams exist for this call.
+            // Do NOT clear booking pending state here — Twilio reconnects with a new stream segment
+            // mid-call after each AI reply, so clearing pending state would break ongoing flows.
+            if (stopped != null) {
                 boolean hasOtherStreams = streams.values().stream()
                         .anyMatch(s -> stopped.callSid.equals(s.callSid));
                 if (!hasOtherStreams) {
                     callFromNumbers.remove(stopped.callSid);
-                    bookingFlowService.clearPending(stopped.callSid);
+                    // Pending booking state is intentionally NOT cleared here.
+                    // It will be cleared when the call truly ends (goodbye detected) or
+                    // when the booking/cancel/reschedule flow completes.
                 }
             }
         }
+    }
+
+    /**
+     * Determines if the AI reply signals the end of the call (goodbye/farewell phrases).
+     * Used to trigger call hangup after the AI speaks the farewell.
+     */
+    private boolean isEndCallReply(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase();
+        // Explicit farewell markers
+        if (lower.contains("have a good day")) return true;
+        if (lower.contains("have a great day")) return true;
+        if (lower.contains("thanks for calling")) return true;
+        if (lower.contains("thank you for calling")) return true;
+        if (lower.endsWith("bye.") || lower.endsWith("bye!")) return true;
+        if (lower.endsWith("goodbye.") || lower.endsWith("goodbye!")) return true;
+        // "take care" + "bye/goodbye" in same reply
+        if (lower.contains("take care") && (lower.contains("bye") || lower.contains("goodbye"))) return true;
+        // "see you then" + "take care" (booking confirmation farewell)
+        if (lower.contains("see you then") && lower.contains("take care")) return true;
+        return false;
     }
 
     private void handleMedia(String streamSid, JsonNode root) {
@@ -214,11 +239,13 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 log.info("🤖 AI REPLY: {}", aiText);
                 conversationStore.appendAssistant(callSid, fromNumber, aiText);
 
-                boolean endCall =
-                        aiText.toLowerCase().contains("have a good day")
-                                || aiText.toLowerCase().contains("bye.");
+                boolean endCall = isEndCallReply(aiText);
 
                 twilioService.speakResponse(callSid, aiText, endCall);
+                if (endCall) {
+                    bookingFlowService.clearPending(callSid);
+                    callFromNumbers.remove(callSid);
+                }
 
             } catch (Exception e) {
                 log.error("❌ PIPELINE ERROR", e);
