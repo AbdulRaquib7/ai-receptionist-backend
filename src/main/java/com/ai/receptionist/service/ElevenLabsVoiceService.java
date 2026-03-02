@@ -29,7 +29,7 @@ public class ElevenLabsVoiceService {
     @Value("${elevenlabs.api-key:}")
     private String apiKey;
 
-    @Value("${elevenlabs.voice-id:21m00Tcm4TlvDq8ikWAM}")
+    @Value("${elevenlabs.voice-id:}")
     private String voiceId;
 
     public ElevenLabsVoiceService(RestTemplateBuilder builder) {
