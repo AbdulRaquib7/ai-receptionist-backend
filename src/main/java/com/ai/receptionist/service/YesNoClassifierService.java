@@ -13,7 +13,8 @@ public class YesNoClassifierService {
 
     private static final Set<String> AFFIRMATIVE_EXACT = Set.of(
             "yes","yeah","yep","ya","yup","ok","okay","sure","correct",
-            "right","confirm","confirmed","go ahead","please do","do it"
+            "right","confirm","confirmed","go ahead","please do","do it",
+            "sure ok","yes please","yeah sure"
     );
 
     private static final Set<String> NEGATIVE_EXACT = Set.of(
@@ -22,7 +23,7 @@ public class YesNoClassifierService {
     );
 
     private static final Pattern YES_PATTERN = Pattern.compile(
-            "\\b(yes|yeah|yep|ok|okay|sure|confirm|correct|right|go ahead|please do)\\b",
+            "\\b(yes|yeah|yep|ok|okay|sure|confirm|correct|right|go ahead|please do|sure ok|yes please|yeah sure)\\b",
             Pattern.CASE_INSENSITIVE
     );
 

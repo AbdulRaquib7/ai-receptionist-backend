@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -21,21 +22,27 @@ public class ConfirmationExecutionService {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmationExecutionService.class);
 
+    private static final String DEFAULT_ANONYMOUS_CALLER = "+10000000000";
+
     private final AppointmentService appointmentService;
+
+    @Value("${caller.anonymous-fallback:+10000000000}")
+    private String anonymousCallerFallback;
 
     /**
      * Resolves the caller's phone for DB lookups. For test/anonymous calls,
-     * uses patientPhone from pending state if available.
+     * uses patientPhone from pending state if available; otherwise uses
+     * configured anonymous fallback so bookings can still be stored.
      */
     private String resolveCallerPhone(String fromNumber, PendingActionDto pending) {
         boolean invalid = fromNumber == null || fromNumber.isBlank()
                 || fromNumber.startsWith("client:")
-                || "anonymous".equalsIgnoreCase(fromNumber);
+                || "anonymous".equalsIgnoreCase(fromNumber.trim());
         if (invalid && pending != null && StringUtils.isNotBlank(pending.getPatientPhone())) {
             return pending.getPatientPhone();
         }
         if (invalid) {
-            return "+10000000000"; // fallback for test; may not find appointments
+            return StringUtils.isNotBlank(anonymousCallerFallback) ? anonymousCallerFallback.trim() : DEFAULT_ANONYMOUS_CALLER;
         }
         return fromNumber;
     }

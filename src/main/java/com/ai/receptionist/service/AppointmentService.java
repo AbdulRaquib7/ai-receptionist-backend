@@ -362,8 +362,11 @@ public class AppointmentService {
                 .findFirst();
     }
 
+    /**
+     * Normalizes time to 12-hour format with two-digit hour (e.g. 07:00 PM) to match DB slot startTime.
+     * Accepts 24h (e.g. 19:00), 12h (e.g. 7:00 PM), and " to " ranges (uses start part).
+     */
     private static String normalizeTime(String time) {
-
         if (time == null) return null;
 
         String t = time.trim().replace('.', ':');
@@ -372,14 +375,21 @@ public class AppointmentService {
             t = t.substring(0, t.indexOf(" to ")).trim();
         }
 
-        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
+        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) {
+            int colon = t.indexOf(':');
+            int space = t.indexOf(' ', colon);
+            int h = Integer.parseInt(t.substring(0, colon));
+            String rest = space > 0 ? t.substring(colon, space).trim() + " " + t.substring(space).trim() : t.substring(colon);
+            return String.format("%02d%s", h, rest);
+        }
 
         if (t.matches("\\d{1,2}:\\d{2}")) {
             int h = Integer.parseInt(t.split(":")[0]);
             String m = t.split(":")[1];
-            return (h >= 12)
-                    ? String.format("%d:%s PM", h == 12 ? 12 : h - 12, m)
-                    : String.format("%d:%s AM", h == 0 ? 12 : h, m);
+            if (h >= 12) {
+                return String.format("%02d:%s PM", h == 12 ? 12 : h - 12, m);
+            }
+            return String.format("%02d:%s AM", h == 0 ? 12 : h, m);
         }
 
         return t;

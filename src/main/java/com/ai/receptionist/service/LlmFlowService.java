@@ -157,13 +157,13 @@ public class LlmFlowService {
     }
 
     private String buildOutputFormatInstructions() {
-        return "OUTPUT FORMAT: Reply with ONLY a JSON object. No markdown, no extra text.\n"
+        return "OUTPUT FORMAT: You MUST reply with ONLY a single JSON object. No markdown, no code fences, no text before or after the JSON. The user will hear only the \"message\" value — never output raw JSON in the message.\n"
                 + "{\"message\": \"your natural reply here\", \"action\": null}\n"
-                + "When asking user to CONFIRM a booking, set action to:\n"
-                + "{\"intent\": \"BOOK\", \"doctorKey\": \"<key from DOCTORS>\", \"date\": \"YYYY-MM-DD\", \"time\": \"06:00 PM\", \"patientName\": \"...\", \"patientPhone\": \"...\"}\n"
+                + "When asking user to CONFIRM a booking, set action to (time must be 12-hour with AM/PM, e.g. 07:00 PM not 19:00):\n"
+                + "{\"intent\": \"BOOK\", \"doctorKey\": \"<key from DOCTORS>\", \"date\": \"YYYY-MM-DD\", \"time\": \"07:00 PM\", \"patientName\": \"...\", \"patientPhone\": \"...\"}\n"
                 + "When asking to CONFIRM cancel: {\"intent\": \"CANCEL\", \"targetPatientName\": \"...\"}\n"
-                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"...\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"06:00 PM\"}\n"
-                + "Use exact doctorKey, date and time from the context. If not asking for confirmation, set \"action\" to null.";
+                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"...\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"07:00 PM\"}\n"
+                + "Use exact doctorKey, date and time from the context. If not asking for confirmation, set \"action\" to null. Never concatenate JSON after the message text — output only the one JSON object.";
     }
 
     private String resolveCallerForLookup(String fromNumber) {
@@ -172,64 +172,140 @@ public class LlmFlowService {
         return fromNumber;
     }
 
+    /**
+     * Parses LLM output. Handles: (1) Valid {"message":"...","action":{...}},
+     * (2) Natural text with trailing JSON (e.g. "...book that?{\"intent\":\"BOOK\",...}"),
+     * (3) Action-only trailing object. The returned message is always speech-safe (no raw JSON).
+     */
     private FlowResponse parseStructuredResponse(String content) {
         if (StringUtils.isBlank(content)) {
             return new FlowResponse("I didn't catch that. Could you repeat?", null);
         }
         content = content.trim();
-        // Strip markdown code block if present
         if (content.startsWith("```")) {
             int start = content.indexOf('{');
             int end = content.lastIndexOf('}');
             if (start >= 0 && end > start) content = content.substring(start, end + 1);
         }
-        int start = content.indexOf('{');
-        if (start < 0) {
-            return new FlowResponse(content, null);
-        }
-        try {
-            JsonNode root = mapper.readTree(content.substring(start));
-            String message = root.has("message") ? root.get("message").asText("").trim() : content;
-            if (message.isEmpty()) message = "Could you say that again?";
 
-            JsonNode actionNode = root.path("action");
-            PendingActionDto action = null;
-            if (actionNode != null && !actionNode.isNull() && actionNode.isObject()) {
-                String intentStr = actionNode.path("intent").asText("");
-                if (StringUtils.isNotBlank(intentStr)) {
-                    try {
-                        PendingActionDto.Intent intent = PendingActionDto.Intent.valueOf(intentStr.toUpperCase());
-                        action = PendingActionDto.builder()
-                                .intent(intent)
-                                .doctorKey(nullIfEmpty(actionNode.path("doctorKey").asText()))
-                                .date(nullIfEmpty(actionNode.path("date").asText()))
-                                .time(nullIfEmpty(actionNode.path("time").asText()))
-                                .patientName(nullIfEmpty(actionNode.path("patientName").asText()))
-                                .patientPhone(nullIfEmpty(actionNode.path("patientPhone").asText()))
-                                .targetPatientName(nullIfEmpty(actionNode.path("targetPatientName").asText()))
-                                .newDate(nullIfEmpty(actionNode.path("newDate").asText()))
-                                .newTime(nullIfEmpty(actionNode.path("newTime").asText()))
-                                .awaitingConfirmation(true)
-                                .build();
-                        log.info("Parsed LLM action: intent={} doctorKey={} date={} time={} patientName={} targetPatient={} newDate={} newTime={}",
-                                intent,
-                                action.getDoctorKey(),
-                                action.getDate(),
-                                action.getTime(),
-                                action.getPatientName(),
-                                action.getTargetPatientName(),
-                                action.getNewDate(),
-                                action.getNewTime());
-                    } catch (IllegalArgumentException e) {
-                        log.warn("Unknown intent in LLM action: {}", intentStr);
+        // Try full-object parse from first {
+        int firstBrace = content.indexOf('{');
+        if (firstBrace >= 0) {
+            try {
+                JsonNode root = mapper.readTree(content.substring(firstBrace));
+                if (root.isObject() && root.has("message")) {
+                    String message = root.get("message").asText("").trim();
+                    if (message.isEmpty()) message = "Could you say that again?";
+                    PendingActionDto action = parseActionNode(root.path("action"));
+                    return new FlowResponse(speechSafeMessage(message), action);
+                }
+            } catch (Exception ignored) { /* fall through to trailing-JSON handling */ }
+        }
+
+        // Try last JSON object (trailing action or malformed full response)
+        int lastBrace = content.lastIndexOf('{');
+        if (lastBrace >= 0) {
+            try {
+                int matchEnd = findMatchingBrace(content, lastBrace);
+                if (matchEnd > lastBrace) {
+                    String jsonPart = content.substring(lastBrace, matchEnd + 1);
+                    JsonNode node = mapper.readTree(jsonPart);
+                    if (node.isObject()) {
+                        if (node.has("message") && node.has("action")) {
+                            String message = node.get("message").asText("").trim();
+                            if (message.isEmpty()) message = "Could you say that again?";
+                            return new FlowResponse(speechSafeMessage(message), parseActionNode(node.path("action")));
+                        }
+                        if (node.has("intent")) {
+                            String textBefore = content.substring(0, lastBrace).trim();
+                            PendingActionDto action = parseActionFromNode(node);
+                            if (action != null) {
+                                String message = textBefore.isEmpty() ? "Could you say that again?" : speechSafeMessage(textBefore);
+                                return new FlowResponse(message, action);
+                            }
+                        }
                     }
                 }
+            } catch (Exception e) {
+                log.warn("Failed to parse trailing JSON: {}", e.getMessage());
             }
-            return new FlowResponse(message, action);
-        } catch (Exception e) {
-            log.warn("Failed to parse LLM JSON, using raw message: {}", e.getMessage());
-            return new FlowResponse(content, null);
         }
+
+        String safe = speechSafeMessage(firstBrace >= 0 ? content.substring(0, firstBrace).trim() : content);
+        if (safe.isEmpty()) safe = "Could you say that again?";
+        return new FlowResponse(safe, null);
+    }
+
+    private int findMatchingBrace(String s, int from) {
+        if (from < 0 || from >= s.length() || s.charAt(from) != '{') return -1;
+        int depth = 1;
+        for (int i = from + 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '{') depth++;
+            else if (c == '}') {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Removes any trailing JSON or raw action from message so it is never spoken. */
+    private static String speechSafeMessage(String message) {
+        if (message == null || message.isEmpty()) return message;
+        int i = message.indexOf('{');
+        if (i >= 0) {
+            String before = message.substring(0, i).trim();
+            if (!before.isEmpty()) return before;
+        }
+        return message.trim();
+    }
+
+    private PendingActionDto parseActionFromNode(JsonNode actionNode) {
+        if (actionNode == null || !actionNode.isObject()) return null;
+        String intentStr = actionNode.path("intent").asText("");
+        if (StringUtils.isBlank(intentStr)) return null;
+        try {
+            PendingActionDto.Intent intent = PendingActionDto.Intent.valueOf(intentStr.toUpperCase());
+            PendingActionDto action = PendingActionDto.builder()
+                    .intent(intent)
+                    .doctorKey(nullIfEmpty(actionNode.path("doctorKey").asText()))
+                    .date(nullIfEmpty(actionNode.path("date").asText()))
+                    .time(normalizeTimeFromLlm(nullIfEmpty(actionNode.path("time").asText())))
+                    .patientName(nullIfEmpty(actionNode.path("patientName").asText()))
+                    .patientPhone(nullIfEmpty(actionNode.path("patientPhone").asText()))
+                    .targetPatientName(nullIfEmpty(actionNode.path("targetPatientName").asText()))
+                    .newDate(nullIfEmpty(actionNode.path("newDate").asText()))
+                    .newTime(normalizeTimeFromLlm(nullIfEmpty(actionNode.path("newTime").asText())))
+                    .awaitingConfirmation(true)
+                    .build();
+            log.info("Parsed LLM action: intent={} doctorKey={} date={} time={} patientName={} targetPatient={} newDate={} newTime={}",
+                    intent, action.getDoctorKey(), action.getDate(), action.getTime(),
+                    action.getPatientName(), action.getTargetPatientName(), action.getNewDate(), action.getNewTime());
+            return action;
+        } catch (IllegalArgumentException e) {
+            log.warn("Unknown intent in LLM action: {}", intentStr);
+            return null;
+        }
+    }
+
+    private PendingActionDto parseActionNode(JsonNode actionNode) {
+        if (actionNode == null || actionNode.isNull() || !actionNode.isObject()) return null;
+        return parseActionFromNode(actionNode);
+    }
+
+    /** Normalizes LLM time (e.g. 19:00 or 7 PM) to 12h format for DB (e.g. 07:00 PM). */
+    private static String normalizeTimeFromLlm(String time) {
+        if (time == null || time.isBlank()) return time;
+        String t = time.trim().replace('.', ':');
+        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
+        if (t.matches("\\d{1,2}:\\d{2}")) {
+            int h = Integer.parseInt(t.split(":")[0]);
+            String m = t.split(":")[1];
+            if (h >= 12) return String.format("%02d:%s PM", h == 12 ? 12 : h - 12, m);
+            return String.format("%02d:%s AM", h == 0 ? 12 : h, m);
+        }
+        return t;
     }
 
     private static String nullIfEmpty(String s) {
