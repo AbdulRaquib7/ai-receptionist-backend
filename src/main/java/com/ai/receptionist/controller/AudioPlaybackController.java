@@ -21,7 +21,7 @@ public class AudioPlaybackController {
     }
 
     @GetMapping(value = "/audio/play/{id}", produces = "audio/mpeg")
-    public ResponseEntity<byte[]> play(@PathVariable String id) {
+    public ResponseEntity<byte[]> play(@PathVariable("id") String id) {
         byte[] audio = playbackCache.take(id);
         if (audio == null || audio.length == 0) {
             return ResponseEntity.notFound().build();
