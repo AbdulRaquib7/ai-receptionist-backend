@@ -1,9 +1,10 @@
 package com.ai.receptionist.websocket;
 
 import com.ai.receptionist.component.ConversationStore;
-import com.ai.receptionist.component.ResponsePhrases;
+import com.ai.receptionist.dto.PendingActionDto;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.service.*;
+import com.ai.receptionist.utils.YesNoResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
@@ -34,11 +35,12 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final Map<String, String> callFromNumbers = new ConcurrentHashMap<>();
 
     private final SttService sttService;
-    private final LlmService llmService;
     private final TwilioService twilioService;
     private final ConversationStore conversationStore;
-    private final BookingFlowService bookingFlowService;
-    private final ResponsePhrases phrases;
+    private final LlmFlowService llmFlowService;
+    private final PendingActionService pendingActionService;
+    private final ConfirmationExecutionService confirmationExecutionService;
+    private final YesNoClassifierService yesNoClassifier;
 
     @Value("${openai.api-key:}")
     private String openAiApiKey;
@@ -48,18 +50,20 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     public MediaStreamHandler(
             SttService sttService,
-            LlmService llmService,
             TwilioService twilioService,
             ConversationStore conversationStore,
-            BookingFlowService bookingFlowService,
-            ResponsePhrases phrases) {
+            LlmFlowService llmFlowService,
+            PendingActionService pendingActionService,
+            ConfirmationExecutionService confirmationExecutionService,
+            YesNoClassifierService yesNoClassifier) {
 
         this.sttService = sttService;
-        this.llmService = llmService;
         this.twilioService = twilioService;
         this.conversationStore = conversationStore;
-        this.bookingFlowService = bookingFlowService;
-        this.phrases = phrases;
+        this.llmFlowService = llmFlowService;
+        this.pendingActionService = pendingActionService;
+        this.confirmationExecutionService = confirmationExecutionService;
+        this.yesNoClassifier = yesNoClassifier;
     }
 
     static class StreamState {
@@ -216,20 +220,37 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 String trimmed = userText.trim();
                 conversationStore.appendUser(callSid, fromNumber, trimmed);
 
+                // Resume: history hydrates from conversation_history when in-memory is empty (e.g. stream reconnect)
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
-                List<String> summary = conversationStore.getConversationSummary(callSid);
 
-                Optional<String> flowReply =
-                        bookingFlowService.processUserMessage(
-                                callSid,
-                                fromNumber,
-                                trimmed,
-                                summary,
-                                openAiApiKey,
-                                openAiModel);
+                PendingActionDto pending = pendingActionService.getPending(callSid);
+                YesNoResult yesNo = yesNoClassifier.classify(trimmed);
 
-                String aiText = flowReply.orElseGet(() ->
-                        llmService.generateReply(callSid, fromNumber, history));
+                String aiText = null;
+
+                // Pending confirmation + user said yes → execute action (backend writes to DB only here)
+                if (pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.YES) {
+                    Optional<String> executed = confirmationExecutionService.execute(callSid, fromNumber, pending);
+                    if (executed.isPresent()) {
+                        aiText = executed.get();
+                        pendingActionService.clearPending(callSid);
+                    }
+                }
+
+                // Pending + user said no → clear and acknowledge
+                if (aiText == null && pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.NO) {
+                    pendingActionService.clearPending(callSid);
+                    aiText = "No problem. What would you like to do?";
+                }
+
+                // Otherwise: LLM drives the flow; may set a new pending action when asking for confirmation
+                if (aiText == null) {
+                    LlmFlowService.FlowResponse response = llmFlowService.generateReply(callSid, fromNumber, history);
+                    aiText = response.getMessage();
+                    if (response.getAction() != null) {
+                        pendingActionService.setPending(callSid, response.getAction());
+                    }
+                }
 
                 if (StringUtils.isBlank(aiText)) {
                     log.warn("⚠ Empty AI reply");
@@ -243,7 +264,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
                 twilioService.speakResponse(callSid, aiText, endCall);
                 if (endCall) {
-                    bookingFlowService.clearPending(callSid);
+                    pendingActionService.clearPending(callSid);
                     callFromNumbers.remove(callSid);
                 }
 

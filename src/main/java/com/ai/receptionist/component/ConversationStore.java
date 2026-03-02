@@ -26,7 +26,21 @@ public class ConversationStore {
         this.historyService = historyService;
     }
 
+    /**
+     * Returns conversation history for the call. If in-memory is empty (e.g. after stream
+     * reconnect or server restart), hydrates from conversation_history table so the flow
+     * can resume seamlessly without losing context.
+     */
     public List<ChatMessage> getHistory(String callSid) {
+        List<ChatMessage> inMemory = conversations.get(callSid);
+        if (inMemory != null && !inMemory.isEmpty()) {
+            return inMemory;
+        }
+        List<ChatMessage> fromDb = historyService.getHistory(callSid);
+        if (!fromDb.isEmpty()) {
+            conversations.put(callSid, new ArrayList<>(fromDb));
+            log.info("[{}] Resumed conversation from DB ({} messages)", callSid, fromDb.size());
+        }
         return conversations.getOrDefault(callSid, Collections.emptyList());
     }
 
