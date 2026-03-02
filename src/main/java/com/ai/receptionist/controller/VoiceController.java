@@ -1,5 +1,8 @@
 package com.ai.receptionist.controller;
 
+import com.ai.receptionist.component.AudioPlaybackCache;
+import com.ai.receptionist.component.ResponsePhrases;
+import com.ai.receptionist.service.ElevenLabsVoiceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,8 +14,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-
-import com.ai.receptionist.component.ResponsePhrases;
 
 import java.util.Map;
 
@@ -29,10 +30,19 @@ public class VoiceController {
     @Value("${twilio.base-url:}")
     private String baseUrl;
 
-    private final ResponsePhrases responsePhrases;
+    @Value("${elevenlabs.voice.enabled:true}")
+    private boolean elevenLabsVoiceEnabled;
 
-    public VoiceController(ResponsePhrases responsePhrases) {
+    private final ResponsePhrases responsePhrases;
+    private final ElevenLabsVoiceService elevenLabsVoiceService;
+    private final AudioPlaybackCache audioPlaybackCache;
+
+    public VoiceController(ResponsePhrases responsePhrases,
+                           ElevenLabsVoiceService elevenLabsVoiceService,
+                           AudioPlaybackCache audioPlaybackCache) {
         this.responsePhrases = responsePhrases;
+        this.elevenLabsVoiceService = elevenLabsVoiceService;
+        this.audioPlaybackCache = audioPlaybackCache;
     }
 
     @PostMapping(value = "/inbound", produces = MediaType.APPLICATION_XML_VALUE)
@@ -48,13 +58,13 @@ public class VoiceController {
     private ResponseEntity<String> inboundTwiMl(Map<String, String> params) {
         String from = params != null ? params.getOrDefault("From", "") : "";
         String callSid = params != null ? params.getOrDefault("CallSid", "") : "";
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(responsePhrases.greeting()) + "</prosody></Say>";
+        String playOrSayTwiml = buildPlaybackTwiml(responsePhrases.greeting());
         String streamParams = "";
         if (StringUtils.hasText(from)) {
             streamParams = "<Parameter name=\"From\" value=\"" + escapeXml(from) + "\"/>";
         }
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\">" + streamParams + "</Stream></Connect>";
-        String twiml = "<Response>" + sayTwiml + connectTwiml + "</Response>";
+        String twiml = "<Response>" + playOrSayTwiml + connectTwiml + "</Response>";
         log.info("Inbound call -> stream to {} | callSid={} from={}", mediaStreamUrl, callSid, from);
         return ResponseEntity.ok(twiml);
     }
@@ -67,10 +77,11 @@ public class VoiceController {
             return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
         }
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(text) + "</prosody></Say>";
+
+        String playOrSayTwiml = buildPlaybackTwiml(text);
+
         if (endCall) {
-            // Hang up immediately after speaking - no redirect, more reliable
-            String twiml = "<Response>" + sayTwiml + "<Hangup/></Response>";
+            String twiml = "<Response>" + playOrSayTwiml + "<Hangup/></Response>";
             log.info("Conversation ended -> hanging up call");
             return ResponseEntity.ok(twiml);
         }
@@ -78,15 +89,31 @@ public class VoiceController {
         String redirectUrl = StringUtils.hasText(baseUrl)
             ? baseUrl.trim().replaceAll("/$", "") + redirectPath
             : redirectPath;
-        String twiml = "<Response>" + sayTwiml + "<Redirect>" + escapeXml(redirectUrl) + "</Redirect></Response>";
+        String twiml = "<Response>" + playOrSayTwiml + "<Redirect>" + escapeXml(redirectUrl) + "</Redirect></Response>";
         return ResponseEntity.ok(twiml);
+    }
+
+    /**
+     * Uses ElevenLabs when enabled and API key is set; otherwise falls back to Twilio Polly.
+     */
+    private String buildPlaybackTwiml(String text) {
+        if (elevenLabsVoiceEnabled && elevenLabsVoiceService != null) {
+            byte[] audio = elevenLabsVoiceService.synthesize(text);
+            if (audio != null && audio.length > 0) {
+                String playbackId = audioPlaybackCache.put(audio);
+                if (playbackId != null && StringUtils.hasText(baseUrl)) {
+                    String playUrl = baseUrl.trim().replaceAll("/$", "") + "/audio/play/" + playbackId;
+                    return "<Play>" + escapeXml(playUrl) + "</Play>";
+                }
+            }
+        }
+        return "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">" + escapeXml(text) + "</prosody></Say>";
     }
 
     @RequestMapping(value = "/twilio/voice/goodbye", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> goodbye() {
-        String sayTwiml = "<Say voice=\"" + escapeXml(VOICE) + "\"><prosody rate=\"1.1\">Thank you, goodbye.</prosody></Say>";
-        String hangupTwiml = "<Hangup/>";
-        String twiml = "<Response>" + sayTwiml + hangupTwiml + "</Response>";
+        String playOrSayTwiml = buildPlaybackTwiml("Thank you, goodbye.");
+        String twiml = "<Response>" + playOrSayTwiml + "<Hangup/></Response>";
         log.info("Conversation ended -> hanging up call");
         return ResponseEntity.ok(twiml);
     }
