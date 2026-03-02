@@ -22,25 +22,22 @@ public class ConfirmationExecutionService {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmationExecutionService.class);
 
-    private static final String DEFAULT_ANONYMOUS_CALLER = "+10000000000";
+    private static final String DEFAULT_ANONYMOUS_CALLER = "+100000000";
 
     private final AppointmentService appointmentService;
 
-    @Value("${caller.anonymous-fallback:+10000000000}")
+    @Value("${caller.anonymous-fallback:+100000000}")
     private String anonymousCallerFallback;
 
     /**
      * Resolves the caller's phone for DB lookups. For test/anonymous calls,
-     * uses patientPhone from pending state if available; otherwise uses
-     * configured anonymous fallback so bookings can still be stored.
+     * always uses the configured anonymous fallback so that bookings, cancel,
+     * and reschedule all share the same synthetic caller number.
      */
     private String resolveCallerPhone(String fromNumber, PendingActionDto pending) {
         boolean invalid = fromNumber == null || fromNumber.isBlank()
                 || fromNumber.startsWith("client:")
                 || "anonymous".equalsIgnoreCase(fromNumber.trim());
-        if (invalid && pending != null && StringUtils.isNotBlank(pending.getPatientPhone())) {
-            return pending.getPatientPhone();
-        }
         if (invalid) {
             return StringUtils.isNotBlank(anonymousCallerFallback) ? anonymousCallerFallback.trim() : DEFAULT_ANONYMOUS_CALLER;
         }

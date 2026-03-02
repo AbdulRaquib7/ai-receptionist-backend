@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -35,6 +36,9 @@ public class BookingFlowService {
 	private final ResponsePhrases phrases;
 	private final IntentClassifier intentClassifier;
 	private final IntentPriorityResolverService intentPriorityResolver;
+
+	@Value("${caller.anonymous-fallback:+100000000}")
+	private String anonymousCallerFallback;
 
 	private final Map<String, PendingStateDto> pendingByCall = new ConcurrentHashMap<>();
 
@@ -426,7 +430,10 @@ public class BookingFlowService {
 				return state.patientPhone;
 			}
 
-			return "+10000000000";
+			String fallback = StringUtils.isNotBlank(anonymousCallerFallback)
+					? anonymousCallerFallback.trim()
+					: "+100000000";
+			return fallback;
 		}
 
 		return phone;

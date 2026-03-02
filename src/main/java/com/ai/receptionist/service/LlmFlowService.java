@@ -40,6 +40,9 @@ public class LlmFlowService {
     @Value("${openai.model:gpt-4o-mini}")
     private String openAiModel;
 
+    @Value("${caller.anonymous-fallback:+100000000}")
+    private String anonymousCallerFallback;
+
     public static class FlowResponse {
         private final String message;
         private final PendingActionDto action;
@@ -167,8 +170,15 @@ public class LlmFlowService {
     }
 
     private String resolveCallerForLookup(String fromNumber) {
-        if (fromNumber == null || fromNumber.isBlank()) return null;
-        if (fromNumber.startsWith("client:") || "anonymous".equalsIgnoreCase(fromNumber)) return null;
+        if (fromNumber == null || fromNumber.isBlank()
+                || fromNumber.startsWith("client:")
+                || "anonymous".equalsIgnoreCase(fromNumber.trim())
+                || "unknown".equalsIgnoreCase(fromNumber.trim())) {
+            String fallback = StringUtils.isNotBlank(anonymousCallerFallback)
+                    ? anonymousCallerFallback.trim()
+                    : "+100000000";
+            return fallback;
+        }
         return fromNumber;
     }
 
