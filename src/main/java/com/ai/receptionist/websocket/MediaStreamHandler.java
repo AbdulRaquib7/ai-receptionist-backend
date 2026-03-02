@@ -224,16 +224,24 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 List<ChatMessage> history = conversationStore.getHistory(callSid);
 
                 PendingActionDto pending = pendingActionService.getPending(callSid);
+                if (pending != null) {
+                    log.info("Pending action currently stored for call {}: intent={} awaitingConfirmation={}",
+                            callSid,
+                            pending.getIntent(),
+                            pending.isAwaitingConfirmation());
+                }
                 YesNoResult yesNo = yesNoClassifier.classify(trimmed);
 
                 String aiText = null;
 
                 // Pending confirmation + user said yes → execute action (backend writes to DB only here)
                 if (pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.YES) {
+                    log.info("User confirmed pending action with YES for call {}", callSid);
                     Optional<String> executed = confirmationExecutionService.execute(callSid, fromNumber, pending);
                     if (executed.isPresent()) {
                         aiText = executed.get();
                         pendingActionService.clearPending(callSid);
+                        log.info("Pending action executed and cleared for call {}", callSid);
                     }
                 }
 

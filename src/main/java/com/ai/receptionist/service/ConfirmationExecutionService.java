@@ -51,6 +51,15 @@ public class ConfirmationExecutionService {
 
         String callerPhone = resolveCallerPhone(fromNumber, pending);
 
+        log.info("Executing pending action for call {}: intent={} callerPhone={} doctorKey={} date={} time={} targetPatient={}",
+                callSid,
+                pending.getIntent(),
+                callerPhone,
+                pending.getDoctorKey(),
+                pending.getDate(),
+                pending.getTime(),
+                pending.getTargetPatientName());
+
         switch (pending.getIntent()) {
             case BOOK:
                 return executeBook(callerPhone, pending);
@@ -80,6 +89,7 @@ public class ConfirmationExecutionService {
             log.info("Booked appointment for {} {}", callerPhone, p.getPatientName());
             return Optional.of("You're all set! Your appointment is confirmed for " + p.getDate() + " at " + p.getTime() + ". We'll see you then. Take care!");
         }
+        log.warn("Book action failed at persistence: doctorKey={} date={} time={}", p.getDoctorKey(), p.getDate(), p.getTime());
         return Optional.of("That slot's no longer available. Want to try a different time?");
     }
 

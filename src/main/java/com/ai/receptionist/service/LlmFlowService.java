@@ -90,6 +90,7 @@ public class LlmFlowService {
             );
             JsonNode root = mapper.readTree(response.getBody());
             String content = root.path("choices").path(0).path("message").path("content").asText("").trim();
+            log.info("LLM RAW RESPONSE for call {}: {}", callSid, content);
             return parseStructuredResponse(content);
         } catch (Exception ex) {
             log.error("LlmFlowService: LLM call failed", ex);
@@ -210,6 +211,15 @@ public class LlmFlowService {
                                 .newTime(nullIfEmpty(actionNode.path("newTime").asText()))
                                 .awaitingConfirmation(true)
                                 .build();
+                        log.info("Parsed LLM action: intent={} doctorKey={} date={} time={} patientName={} targetPatient={} newDate={} newTime={}",
+                                intent,
+                                action.getDoctorKey(),
+                                action.getDate(),
+                                action.getTime(),
+                                action.getPatientName(),
+                                action.getTargetPatientName(),
+                                action.getNewDate(),
+                                action.getNewTime());
                     } catch (IllegalArgumentException e) {
                         log.warn("Unknown intent in LLM action: {}", intentStr);
                     }
