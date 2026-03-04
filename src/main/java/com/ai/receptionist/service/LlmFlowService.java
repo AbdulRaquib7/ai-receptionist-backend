@@ -81,6 +81,8 @@ public class LlmFlowService {
         body.put("model", openAiModel != null ? openAiModel : "gpt-4o-mini");
         body.put("temperature", 0.2);
         body.put("messages", messages);
+        // Force the model to return valid JSON so parsing is reliable.
+        body.put("response_format", Map.of("type", "json_object"));
 
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -94,7 +96,14 @@ public class LlmFlowService {
             JsonNode root = mapper.readTree(response.getBody());
             String content = root.path("choices").path(0).path("message").path("content").asText("").trim();
             log.info("LLM RAW RESPONSE for call {}: {}", callSid, content);
-            return parseStructuredResponse(content);
+            FlowResponse parsed = parseStructuredResponse(content);
+            if (parsed.getAction() != null) {
+                log.info("LlmFlowService: structured action present for call {} -> intent={}",
+                        callSid, parsed.getAction().getIntent());
+            } else {
+                log.info("LlmFlowService: no structured action returned for call {}", callSid);
+            }
+            return parsed;
         } catch (Exception ex) {
             log.error("LlmFlowService: LLM call failed", ex);
             return new FlowResponse("Sorry, I didn't catch that. Could you repeat?", null);
@@ -104,7 +113,10 @@ public class LlmFlowService {
     private String buildContext(String fromNumber) {
         String today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
         StringBuilder ctx = new StringBuilder();
-        ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n\n");
+        ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n");
+        ctx.append("CURRENT TIME (24h, clinic local time): ")
+                .append(java.time.LocalTime.now().withSecond(0).withNano(0).toString())
+                .append(". Use this to decide if today's remaining slots are still valid.\n\n");
         ctx.append("DATABASE STATE (single source of truth; slots from appointment_slot WHERE status=AVAILABLE):\n\n");
 
         List<Doctor> doctors = appointmentService.getAllDoctors();
@@ -150,11 +162,14 @@ public class LlmFlowService {
 
         ctx.append("\nVOICE & RULES:\n");
         ctx.append("- You are a real human receptionist. Short, warm, conversational. No robotic phrases.\n");
-        ctx.append("- Answer general questions briefly, then return to flow: \"Now, about your appointment…\"\n");
-        ctx.append("- BOOK: suggest doctor → slots (from list above) → name & phone → ask confirmation.\n");
-        ctx.append("- CANCEL/RESCHEDULE: use caller's appointments above; confirm which one; ask confirmation.\n");
+        ctx.append("- Answer general questions briefly, then return to flow: \"Now, about your appointment…\". Never book or cancel an appointment for pure general questions.\n");
+        ctx.append("- When offering times, prefer slots for TODAY and TOMORROW only. Use AVAILABLE SLOTS above as the single source of truth; never invent times.\n");
+        ctx.append("- For TODAY, ignore any times that are earlier than the CURRENT TIME. If all of today's slots are already in the past, say that today is fully booked and offer TOMORROW and the day after (using the actual future slots from the list).\n");
+        ctx.append("- BOOK: suggest doctor → read slot options from the list (grouped today/tomorrow) → collect name & phone → ask confirmation.\n");
+        ctx.append("- CANCEL/RESCHEDULE: use caller's upcoming appointments above; confirm which one; ask confirmation.\n");
+        ctx.append("- Phone number: if the contact number sounds incomplete, missing digits, or unclear, politely ask the caller again for the full number and confirm it before proceeding to book.\n");
         ctx.append("- Only when you ask user to CONFIRM (e.g. \"Should I go ahead and book that?\") include the \"action\" block in your JSON.\n");
-        ctx.append("- Goodbye: \"Thanks for calling. Take care!\" Only when user clearly says bye.\n");
+        ctx.append("- Goodbye: \"Thanks for calling. Take care!\" Only when user clearly says bye or explicitly wants to end the call.\n");
         ctx.append("- Unclear: \"Sorry, I didn't catch that. Could you repeat?\"\n");
         return ctx.toString();
     }
@@ -164,8 +179,8 @@ public class LlmFlowService {
                 + "{\"message\": \"your natural reply here\", \"action\": null}\n"
                 + "When asking user to CONFIRM a booking, set action to (time must be 12-hour with AM/PM, e.g. 07:00 PM not 19:00):\n"
                 + "{\"intent\": \"BOOK\", \"doctorKey\": \"<key from DOCTORS>\", \"date\": \"YYYY-MM-DD\", \"time\": \"07:00 PM\", \"patientName\": \"...\", \"patientPhone\": \"...\"}\n"
-                + "When asking to CONFIRM cancel: {\"intent\": \"CANCEL\", \"targetPatientName\": \"...\"}\n"
-                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"...\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"07:00 PM\"}\n"
+                + "When asking to CONFIRM cancel: {\"intent\": \"CANCEL\", \"targetPatientName\": \"<patient name from CALLER'S UPCOMING APPOINTMENTS, not the doctor>\"}\n"
+                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"<patient name>\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"07:00 PM\"}\n"
                 + "Use exact doctorKey, date and time from the context. If not asking for confirmation, set \"action\" to null. Never concatenate JSON after the message text — output only the one JSON object.";
     }
 

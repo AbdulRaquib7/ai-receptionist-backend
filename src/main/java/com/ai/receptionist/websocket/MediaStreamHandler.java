@@ -26,7 +26,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     private static final int SILENCE_FRAMES = 25;
     private static final int MIN_AUDIO_BYTES = 16000;
-    private static final int MAX_BUFFER_BYTES = 43000;
+    // Allow slightly longer utterances before forcing STT, to avoid cutting callers off mid-sentence.
+    private static final int MAX_BUFFER_BYTES = 64000;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -229,6 +230,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                             callSid,
                             pending.getIntent(),
                             pending.isAwaitingConfirmation());
+                } else {
+                    log.info("No pending action currently stored for call {}", callSid);
                 }
                 YesNoResult yesNo = yesNoClassifier.classify(trimmed);
 
@@ -248,6 +251,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 // Pending + user said no → clear and acknowledge
                 if (aiText == null && pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.NO) {
                     pendingActionService.clearPending(callSid);
+                    log.info("User rejected pending action with NO for call {} -> pending cleared", callSid);
                     aiText = "No problem. What would you like to do?";
                 }
 
@@ -257,6 +261,15 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                     aiText = response.getMessage();
                     if (response.getAction() != null) {
                         pendingActionService.setPending(callSid, response.getAction());
+                        log.info("Pending action set for call {}: intent={} doctorKey={} date={} time={} targetPatient={}",
+                                callSid,
+                                response.getAction().getIntent(),
+                                response.getAction().getDoctorKey(),
+                                response.getAction().getDate(),
+                                response.getAction().getTime(),
+                                response.getAction().getTargetPatientName());
+                    } else {
+                        log.info("No pending action set for call {} from this LLM turn", callSid);
                     }
                 }
 

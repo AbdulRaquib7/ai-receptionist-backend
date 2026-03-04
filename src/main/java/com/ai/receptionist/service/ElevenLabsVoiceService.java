@@ -8,6 +8,7 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -70,6 +71,9 @@ public class ElevenLabsVoiceService {
                 log.debug("ElevenLabs TTS OK, bytes={}", response.getBody().length);
                 return response.getBody();
             }
+            log.warn("ElevenLabs TTS non-2xx status: {}", response.getStatusCode());
+        } catch (HttpClientErrorException.Unauthorized e) {
+            log.error("ElevenLabs TTS returned 401 Unauthorized. Check elevenlabs.api-key and voice-id configuration. See https://elevenlabs.io for API key management.");
         } catch (Exception e) {
             log.error("ElevenLabs TTS failed: {}", e.getMessage());
         }
