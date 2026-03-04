@@ -26,7 +26,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
     private static final int SILENCE_FRAMES = 25;
     private static final int MIN_AUDIO_BYTES = 16000;
-    private static final int MAX_BUFFER_BYTES = 64000;
+    private static final int MAX_BUFFER_BYTES = 43000;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
