@@ -107,6 +107,7 @@ public class ConversationOrchestrator {
         YesNoResult yesNo = yesNoClassifier.classify(trimmed);
 
         String aiText = null;
+        PendingActionDto actionFromLlm = null;
 
         // Pending confirmation + user said yes → execute action (backend writes to DB only here)
         if (pendingOpt.isPresent() && yesNo == YesNoResult.YES) {
@@ -134,14 +135,37 @@ public class ConversationOrchestrator {
             try {
                 LlmFlowService.FlowResponse response = llmFlowService.generateReply(callSid, fromNumber, tenantId, history);
                 aiText = response.getMessage();
-                if (response.getAction() != null) {
-                    pendingActionService.setPending(callSid, response.getAction());
-                }
+                actionFromLlm = response.getAction();
             } catch (LlmException e) {
                 log.error("LLM failed for call {}: {}", callSid, e.getMessage());
                 twilioService.speakResponse(callSid,
                         "I'm having a quick technical moment. Could you repeat that?", false, tenantId);
                 return;
+            }
+        }
+
+        // If LLM produced an action but there was no prior pending action,
+        // and the user utterance was effectively a YES (e.g. \"Yes, yes\" or
+        // confirmation phrasing), treat this as immediate confirmation and
+        // execute the action instead of requiring an extra turn.
+        if (actionFromLlm != null) {
+            if (!pendingOpt.isPresent() && yesNo == YesNoResult.YES) {
+                log.info("Executing newly suggested action immediately for call {} based on YES utterance", callSid);
+                Optional<String> executed = confirmationExecutionService.execute(callSid, fromNumber, tenantId, actionFromLlm);
+                if (executed.isPresent()) {
+                    aiText = executed.get();
+                    pendingActionService.clearPending(callSid);
+                    CallSession.Outcome outcome = mapIntentToOutcome(actionFromLlm.getIntent());
+                    callSessionService.setOutcome(callSid, outcome);
+                    log.info("Newly suggested action executed for call {} with outcome={}", callSid, outcome);
+                    actionFromLlm = null; // already executed; don't store as pending
+                } else {
+                    // Execution failed (e.g. slot not available); fall back to storing as pending so flow can continue safely.
+                    pendingActionService.setPending(callSid, actionFromLlm);
+                }
+            } else {
+                // Normal case: LLM is asking user to CONFIRM; store as pending.
+                pendingActionService.setPending(callSid, actionFromLlm);
             }
         }
 
