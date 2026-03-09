@@ -77,9 +77,31 @@ public class VoiceController {
         // Resolve tenant by the Twilio number that received the call
         Tenant tenant = tenantService.resolveTenant(to);
 
+        if (tenant == null) {
+            log.error("Tenant resolution failed for Twilio number {}", to);
+        } else {
+            log.info("Tenant resolved successfully: id={} slug={} phone={}",
+                    tenant.getId(),
+                    tenant.getSlug(),
+                    to);
+        }
+        
+        if (tenant == null) {
+            log.error("No tenant found for Twilio number: {}", to);
+            return ResponseEntity.ok(
+                "<Response><Say>Service unavailable.</Say><Hangup/></Response>"
+            );
+        }
+
         // Track call session
         if (StringUtils.hasText(callSid)) {
-            callSessionService.createInbound(tenant.getId(), callSid, from, to);
+        	log.info("Creating call session: tenantId={} callSid={} from={} to={}",
+        	        tenant.getId(),
+        	        callSid,
+        	        LogSanitizer.maskPhone(from),
+        	        to);
+
+        	callSessionService.createInbound(tenant.getId(), callSid, from, to);
         }
 
         String playOrSayTwiml = buildPlaybackTwiml(responsePhrases.greeting(tenant.getId()));
@@ -99,10 +121,13 @@ public class VoiceController {
     @RequestMapping(value = "/twilio/voice/say", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> say(
             @RequestParam("text") String text,
-            @RequestParam(value = "end", required = false) String end) {
+            @RequestParam(value = "end", required = false) String end,
+            @RequestParam(value = "TenantId", required = false) String tenantId) {
+
         if (!StringUtils.hasText(text)) {
             return ResponseEntity.badRequest().body("<Response><Say>No text.</Say></Response>");
         }
+
         boolean endCall = "1".equals(end) || "true".equalsIgnoreCase(end != null ? end : "");
 
         String playOrSayTwiml = buildPlaybackTwiml(text);
@@ -112,11 +137,16 @@ public class VoiceController {
             log.info("Conversation ended -> hanging up call");
             return ResponseEntity.ok(twiml);
         }
-        String redirectPath = "/twilio/voice/continue-call";
-        String redirectUrl = StringUtils.hasText(baseUrl)
-            ? baseUrl.trim().replaceAll("/$", "") + redirectPath
-            : redirectPath;
-        String twiml = "<Response>" + playOrSayTwiml + "<Redirect>" + escapeXml(redirectUrl) + "</Redirect></Response>";
+
+        String redirectUrl =
+                baseUrl + "/twilio/voice/continue-call?TenantId=" + tenantId;
+
+        String twiml =
+                "<Response>" +
+                playOrSayTwiml +
+                "<Redirect>" + escapeXml(redirectUrl) + "</Redirect>" +
+                "</Response>";
+
         return ResponseEntity.ok(twiml);
     }
 
@@ -151,23 +181,44 @@ public class VoiceController {
     }
 
     @PostMapping(value = "/continue-call", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> continueCall() {
-        return continueCallTwiMl();
+    public ResponseEntity<String> continueCall(@RequestParam Map<String,String> params) {
+        return continueCallTwiMl(params);
     }
 
-    @RequestMapping(value = "/twilio/voice/continue-call", method = {RequestMethod.GET, RequestMethod.POST}, produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> twilioVoiceContinueCall() {
-        return continueCallTwiMl();
+    @RequestMapping(value = "/twilio/voice/continue-call",
+            method = {RequestMethod.GET, RequestMethod.POST},
+            produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> twilioVoiceContinueCall(
+            @RequestParam Map<String,String> params) {
+
+        return continueCallTwiMl(params);
     }
 
     /**
      * After AI speaks: re-connect stream only (silent — no spoken phrase).
      * Do NOT redirect to inbound (that would replay the greeting).
      */
-    private ResponseEntity<String> continueCallTwiMl() {
-        String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\"/></Connect>";
+    private ResponseEntity<String> continueCallTwiMl(Map<String,String> params) {
+
+        String tenantId = params.getOrDefault("TenantId", "");
+
+        StringBuilder streamParams = new StringBuilder();
+
+        if (StringUtils.hasText(tenantId)) {
+            streamParams.append("<Parameter name=\"TenantId\" value=\"")
+                    .append(escapeXml(tenantId))
+                    .append("\"/>");
+        }
+
+        String connectTwiml =
+                "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\">"
+                        + streamParams +
+                        "</Stream></Connect>";
+
         String twiml = "<Response>" + connectTwiml + "</Response>";
-        log.debug("Continue call -> re-connect stream");
+
+        log.info("Continue call -> reconnect stream tenantId={}", tenantId);
+
         return ResponseEntity.ok(twiml);
     }
 

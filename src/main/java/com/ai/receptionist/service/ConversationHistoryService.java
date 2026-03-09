@@ -1,7 +1,9 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.entity.CallSession;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.entity.ConversationHistory;
+import com.ai.receptionist.repository.CallSessionRepository;
 import com.ai.receptionist.repository.ConversationHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -15,6 +17,8 @@ import java.util.stream.Collectors;
 public class ConversationHistoryService {
 
     private final ConversationHistoryRepository repository;
+    
+    private final CallSessionRepository callSessionRepository;
 
     @Transactional(readOnly = true)
     public List<ChatMessage> getHistory(String callSid) {
@@ -25,7 +29,13 @@ public class ConversationHistoryService {
 
     @Transactional
     public void append(String callSid, String twilioPhone, String role, String content) {
-        append(callSid, twilioPhone, role, content, null);
+
+        Long tenantId = callSessionRepository
+                .findByTwilioCallSid(callSid)
+                .map(CallSession::getTenantId)
+                .orElse(null);
+
+        append(callSid, twilioPhone, role, content, tenantId);
     }
 
     @Transactional

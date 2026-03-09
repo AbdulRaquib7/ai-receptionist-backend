@@ -4,6 +4,10 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.Instant;
+import java.util.Map;
+
+import com.vladmihalcea.hibernate.type.json.JsonType;
+import org.hibernate.annotations.Type;
 
 @Entity
 @Table(name = "call_session")
@@ -60,8 +64,9 @@ public class CallSession {
     @Column(columnDefinition = "TEXT")
     private String summary;
 
-    @Column(columnDefinition = "JSONB")
-    private String metadata;
+    @Type(JsonType.class)
+    @Column(columnDefinition = "jsonb")
+    private Map<String, Object> metadata;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;

@@ -58,7 +58,7 @@ public class TwilioService {
         }
 
         try {
-            String sayUrl = buildSayUrl(text, endCall);
+        	String sayUrl = buildSayUrl(text, endCall, tenantId);
 
             String apiUrl = TWILIO_API_BASE +
                     "/Accounts/" + creds.accountSid() +
@@ -123,7 +123,7 @@ public class TwilioService {
      * Builds Twilio say URL.
      * If endCall=true, TwiML will hang up AFTER speech finishes.
      */
-    private String buildSayUrl(String text, boolean endCall) {
+    private String buildSayUrl(String text, boolean endCall, Long tenantId) {
 
         String encoded;
 
@@ -138,6 +138,10 @@ public class TwilioService {
                 : "";
 
         String url = base + SAY_PATH + "?text=" + encoded;
+
+        if (tenantId != null) {
+            url += "&TenantId=" + tenantId;
+        }
 
         if (endCall) {
             url += "&end=1";

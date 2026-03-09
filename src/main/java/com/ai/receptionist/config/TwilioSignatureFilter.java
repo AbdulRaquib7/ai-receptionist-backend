@@ -66,7 +66,17 @@ public class TwilioSignatureFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        String path = request.getRequestURI();
+    	String path = request.getRequestURI();
+
+    	// Skip TwiML playback / redirect endpoints
+    	if (path.startsWith("/twilio/voice/say") ||
+    	    path.startsWith("/twilio/voice/continue-call") ||
+    	    path.startsWith("/twilio/voice/goodbye") ||
+    	    path.startsWith("/audio/play")) {
+
+    	    filterChain.doFilter(request, response);
+    	    return;
+    	}
 
         // Only validate requests to protected Twilio endpoints
         if (!isProtectedPath(path)) {
