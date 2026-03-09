@@ -1,12 +1,13 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.component.CallerPhoneResolver;
 import com.ai.receptionist.dto.PendingActionDto;
 import com.ai.receptionist.entity.Appointment;
+import com.ai.receptionist.utils.LogSanitizer;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -22,66 +23,49 @@ public class ConfirmationExecutionService {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmationExecutionService.class);
 
-    private static final String DEFAULT_ANONYMOUS_CALLER = "+100000000";
-
     private final AppointmentService appointmentService;
-
-    @Value("${caller.anonymous-fallback:+100000000}")
-    private String anonymousCallerFallback;
-
-    /**
-     * Resolves the caller's phone for DB lookups. For test/anonymous calls,
-     * always uses the configured anonymous fallback so that bookings, cancel,
-     * and reschedule all share the same synthetic caller number.
-     */
-    private String resolveCallerPhone(String fromNumber, PendingActionDto pending) {
-        boolean invalid = fromNumber == null || fromNumber.isBlank()
-                || fromNumber.startsWith("client:")
-                || "anonymous".equalsIgnoreCase(fromNumber.trim());
-        if (invalid) {
-            return StringUtils.isNotBlank(anonymousCallerFallback) ? anonymousCallerFallback.trim() : DEFAULT_ANONYMOUS_CALLER;
-        }
-        return fromNumber;
-    }
+    private final CallerPhoneResolver callerPhoneResolver;
 
     /**
      * Executes the pending action (BOOK, CANCEL, RESCHEDULE) and returns a
      * short human-friendly message. Clears pending on success.
      */
-    public Optional<String> execute(String callSid, String fromNumber, PendingActionDto pending) {
+    public Optional<String> execute(String callSid, String fromNumber, Long tenantId, PendingActionDto pending) {
         if (pending == null || !pending.isAwaitingConfirmation()) {
             return Optional.empty();
         }
 
-        String callerPhone = resolveCallerPhone(fromNumber, pending);
+        String callerPhone = callerPhoneResolver.resolve(fromNumber);
 
-        log.info("Executing pending action for call {}: intent={} callerPhone={} doctorKey={} date={} time={} targetPatient={}",
+        log.info("Executing pending action for call {}: intent={} callerPhone={} doctorKey={} date={} time={} targetPatient={} tenant={}",
                 callSid,
                 pending.getIntent(),
-                callerPhone,
+                LogSanitizer.maskPhone(callerPhone),
                 pending.getDoctorKey(),
                 pending.getDate(),
                 pending.getTime(),
-                pending.getTargetPatientName());
+                LogSanitizer.maskName(pending.getTargetPatientName()),
+                tenantId);
 
         switch (pending.getIntent()) {
             case BOOK:
-                return executeBook(callerPhone, pending);
+                return executeBook(tenantId, callerPhone, pending);
             case CANCEL:
-                return executeCancel(callerPhone, pending);
+                return executeCancel(tenantId, callerPhone, pending);
             case RESCHEDULE:
-                return executeReschedule(callerPhone, pending);
+                return executeReschedule(tenantId, callerPhone, pending);
             default:
                 return Optional.empty();
         }
     }
 
-    private Optional<String> executeBook(String callerPhone, PendingActionDto p) {
+    private Optional<String> executeBook(Long tenantId, String callerPhone, PendingActionDto p) {
         if (StringUtils.isBlank(p.getDoctorKey()) || StringUtils.isBlank(p.getDate()) || StringUtils.isBlank(p.getTime())) {
             log.warn("Book action missing required fields");
             return Optional.of("I don't have the full booking details. Let's try again.");
         }
         Optional<Appointment> result = appointmentService.bookAppointment(
+                tenantId,
                 callerPhone,
                 p.getPatientName(),
                 p.getPatientPhone(),
@@ -90,27 +74,28 @@ public class ConfirmationExecutionService {
                 p.getTime()
         );
         if (result.isPresent()) {
-            log.info("Booked appointment for {} {}", callerPhone, p.getPatientName());
+            log.info("Booked appointment for {} {}", LogSanitizer.maskPhone(callerPhone), LogSanitizer.maskName(p.getPatientName()));
             return Optional.of("You're all set! Your appointment is confirmed for " + p.getDate() + " at " + p.getTime() + ". We'll see you then. Take care!");
         }
         log.warn("Book action failed at persistence: doctorKey={} date={} time={}", p.getDoctorKey(), p.getDate(), p.getTime());
         return Optional.of("That slot's no longer available. Want to try a different time?");
     }
 
-    private Optional<String> executeCancel(String callerPhone, PendingActionDto p) {
-        boolean ok = appointmentService.cancelAppointment(callerPhone, p.getTargetPatientName());
+    private Optional<String> executeCancel(Long tenantId, String callerPhone, PendingActionDto p) {
+        boolean ok = appointmentService.cancelAppointment(tenantId, callerPhone, p.getTargetPatientName());
         if (ok) {
-            log.info("Cancelled appointment for {} ({})", callerPhone, p.getTargetPatientName());
+            log.info("Cancelled appointment for {} ({})", LogSanitizer.maskPhone(callerPhone), LogSanitizer.maskName(p.getTargetPatientName()));
             return Optional.of("Done, it's cancelled. Anything else I can help with?");
         }
         return Optional.of("I couldn't find that appointment. Want to try again or book a new one?");
     }
 
-    private Optional<String> executeReschedule(String callerPhone, PendingActionDto p) {
+    private Optional<String> executeReschedule(Long tenantId, String callerPhone, PendingActionDto p) {
         if (StringUtils.isBlank(p.getNewDate()) || StringUtils.isBlank(p.getNewTime())) {
             return Optional.of("I need the new date and time. What would work for you?");
         }
         Optional<Appointment> result = appointmentService.rescheduleAppointment(
+                tenantId,
                 callerPhone,
                 p.getTargetPatientName(),
                 p.getDoctorKey(),
@@ -118,7 +103,7 @@ public class ConfirmationExecutionService {
                 p.getNewTime()
         );
         if (result.isPresent()) {
-            log.info("Rescheduled for {} to {} {}", callerPhone, p.getNewDate(), p.getNewTime());
+            log.info("Rescheduled for {} to {} {}", LogSanitizer.maskPhone(callerPhone), p.getNewDate(), p.getNewTime());
             return Optional.of("All set! Your appointment is moved to " + p.getNewDate() + " at " + p.getNewTime() + ". Anything else?");
         }
         return Optional.of("That new slot isn't available. Want to pick another time?");

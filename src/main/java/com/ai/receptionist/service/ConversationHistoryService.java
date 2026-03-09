@@ -25,11 +25,19 @@ public class ConversationHistoryService {
 
     @Transactional
     public void append(String callSid, String twilioPhone, String role, String content) {
-        repository.save(ConversationHistory.builder()
+        append(callSid, twilioPhone, role, content, null);
+    }
+
+    @Transactional
+    public void append(String callSid, String twilioPhone, String role, String content, Long tenantId) {
+        ConversationHistory.ConversationHistoryBuilder builder = ConversationHistory.builder()
                 .callSid(callSid)
                 .twilioPhone(twilioPhone)
                 .role(role)
-                .content(content)
-                .build());
+                .content(content);
+        if (tenantId != null) {
+            builder.tenantId(tenantId);
+        }
+        repository.save(builder.build());
     }
 }

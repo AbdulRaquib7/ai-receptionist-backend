@@ -36,6 +36,13 @@ public class Appointment {
     @Column(nullable = false)
     private Status status = Status.CONFIRMED;
 
+    @Column(nullable = false)
+    @Builder.Default
+    private boolean reminded = false;
+
+    @Column(name = "tenant_id", nullable = false)
+    private Long tenantId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

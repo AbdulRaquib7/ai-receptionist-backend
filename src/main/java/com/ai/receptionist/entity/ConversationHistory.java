@@ -30,6 +30,9 @@ public class ConversationHistory {
     @Column(columnDefinition = "TEXT", nullable = false)
     private String content;
 
+    @Column(name = "tenant_id", nullable = false)
+    private Long tenantId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

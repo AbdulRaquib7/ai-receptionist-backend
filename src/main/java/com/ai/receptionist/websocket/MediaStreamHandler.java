@@ -1,79 +1,74 @@
 package com.ai.receptionist.websocket;
 
-import com.ai.receptionist.component.ConversationStore;
-import com.ai.receptionist.dto.PendingActionDto;
-import com.ai.receptionist.entity.ChatMessage;
-import com.ai.receptionist.service.*;
-import com.ai.receptionist.utils.YesNoResult;
+import com.ai.receptionist.config.ConversationProperties;
+import com.ai.receptionist.service.CallSessionService;
+import com.ai.receptionist.service.ConversationOrchestrator;
+import com.ai.receptionist.utils.LogSanitizer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.lang3.StringUtils;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
-import org.springframework.beans.factory.annotation.Value;
+
+import org.springframework.beans.factory.annotation.Qualifier;
 
 import java.io.ByteArrayOutputStream;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Twilio Media Stream WebSocket handler.
+ * Responsibilities: WebSocket lifecycle, audio buffering, silence detection,
+ * and dispatching complete utterances to {@link ConversationOrchestrator}.
+ */
 @Component
 public class MediaStreamHandler extends TextWebSocketHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MediaStreamHandler.class);
 
-    private static final int SILENCE_FRAMES = 25;
-    private static final int MIN_AUDIO_BYTES = 16000;
-    // Allow slightly longer utterances before forcing STT, to avoid cutting callers off mid-sentence.
-    private static final int MAX_BUFFER_BYTES = 64000;
+    private final ObjectMapper mapper;
+    private final ConversationProperties conversationProps;
+    private final ExecutorService voicePipelineExecutor;
+    private final CallSessionService callSessionService;
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    /** TTL-bounded cache: max 500 active streams, auto-expire after 1 hour of inactivity */
+    private final Cache<String, StreamState> streams = Caffeine.newBuilder()
+            .maximumSize(500)
+            .expireAfterAccess(1, TimeUnit.HOURS)
+            .build();
 
-    private final Map<String, StreamState> streams = new ConcurrentHashMap<>();
     /** Persists callSid -> fromNumber across multiple stream segments within the same call */
-    private final Map<String, String> callFromNumbers = new ConcurrentHashMap<>();
+    private final Cache<String, String> callFromNumbers = Caffeine.newBuilder()
+            .maximumSize(500)
+            .expireAfterAccess(1, TimeUnit.HOURS)
+            .build();
 
-    private final SttService sttService;
-    private final TwilioService twilioService;
-    private final ConversationStore conversationStore;
-    private final LlmFlowService llmFlowService;
-    private final PendingActionService pendingActionService;
-    private final ConfirmationExecutionService confirmationExecutionService;
-    private final YesNoClassifierService yesNoClassifier;
+    private final ConversationOrchestrator orchestrator;
 
-    @Value("${openai.api-key:}")
-    private String openAiApiKey;
-
-    @Value("${openai.model:gpt-4o-mini}")
-    private String openAiModel;
-
-    public MediaStreamHandler(
-            SttService sttService,
-            TwilioService twilioService,
-            ConversationStore conversationStore,
-            LlmFlowService llmFlowService,
-            PendingActionService pendingActionService,
-            ConfirmationExecutionService confirmationExecutionService,
-            YesNoClassifierService yesNoClassifier) {
-
-        this.sttService = sttService;
-        this.twilioService = twilioService;
-        this.conversationStore = conversationStore;
-        this.llmFlowService = llmFlowService;
-        this.pendingActionService = pendingActionService;
-        this.confirmationExecutionService = confirmationExecutionService;
-        this.yesNoClassifier = yesNoClassifier;
+    public MediaStreamHandler(ConversationOrchestrator orchestrator,
+                              ObjectMapper objectMapper,
+                              ConversationProperties conversationProps,
+                              @Qualifier("voicePipelineExecutor") ExecutorService voicePipelineExecutor,
+                              CallSessionService callSessionService) {
+        this.orchestrator = orchestrator;
+        this.mapper = objectMapper;
+        this.conversationProps = conversationProps;
+        this.voicePipelineExecutor = voicePipelineExecutor;
+        this.callSessionService = callSessionService;
     }
 
     static class StreamState {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         int silenceFrames = 0;
-        boolean processing = false;
-        boolean closed = false;
+        volatile boolean processing = false;
+        volatile boolean closed = false;
         String callSid;
         String fromNumber = "";
+        Long tenantId;
         long framesReceived = 0;
     }
 
@@ -88,20 +83,28 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             StreamState state = new StreamState();
             state.callSid = root.path("start").path("callSid").asText("");
             // Extract caller's phone number passed as a custom parameter from TwiML
-            String fromParam = root.path("start").path("customParameters").path("From").asText("");
+            JsonNode customParams = root.path("start").path("customParameters");
+            String fromParam = customParams.path("From").asText("");
             if (!fromParam.isBlank()) {
                 state.fromNumber = fromParam;
                 callFromNumbers.put(state.callSid, fromParam);
             } else {
                 // Reuse fromNumber from a previous stream segment of the same call
-                state.fromNumber = callFromNumbers.getOrDefault(state.callSid, "");
+                String cached = callFromNumbers.getIfPresent(state.callSid);
+                state.fromNumber = cached != null ? cached : "";
+            }
+            // Extract tenantId passed from VoiceController
+            String tenantIdParam = customParams.path("TenantId").asText("");
+            if (!tenantIdParam.isBlank()) {
+                try { state.tenantId = Long.parseLong(tenantIdParam); } catch (NumberFormatException ignored) {}
             }
             streams.put(streamSid, state);
 
             log.info("========== STREAM START ==========");
             log.info("Stream SID : {}", streamSid);
             log.info("Call SID   : {}", state.callSid);
-            log.info("From       : {}", state.fromNumber.isBlank() ? "(test/anonymous)" : state.fromNumber);
+            log.info("From       : {}", state.fromNumber.isBlank() ? "(test/anonymous)" : LogSanitizer.maskPhone(state.fromNumber));
+            log.info("Tenant ID  : {}", state.tenantId);
             log.info("==================================");
             return;
         }
@@ -113,52 +116,34 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
         if ("stop".equals(event)) {
             log.info("STREAM STOP: {}", streamSid);
-            StreamState stopped = streams.remove(streamSid);
-            // Only clean up the callSid->fromNumber mapping when no more streams exist for this call.
-            // Do NOT clear booking pending state here — Twilio reconnects with a new stream segment
-            // mid-call after each AI reply, so clearing pending state would break ongoing flows.
+            StreamState stopped = streams.getIfPresent(streamSid);
+            streams.invalidate(streamSid);
             if (stopped != null) {
-                boolean hasOtherStreams = streams.values().stream()
+                boolean hasOtherStreams = streams.asMap().values().stream()
                         .anyMatch(s -> stopped.callSid.equals(s.callSid));
                 if (!hasOtherStreams) {
-                    callFromNumbers.remove(stopped.callSid);
-                    // Pending booking state is intentionally NOT cleared here.
-                    // It will be cleared when the call truly ends (goodbye detected) or
-                    // when the booking/cancel/reschedule flow completes.
+                    callFromNumbers.invalidate(stopped.callSid);
+                    // Complete the call session if not already completed (e.g. user hung up)
+                    callSessionService.completeCall(stopped.callSid);
                 }
             }
         }
     }
 
-    /**
-     * Determines if the AI reply signals the end of the call (goodbye/farewell phrases).
-     * Used to trigger call hangup after the AI speaks the farewell.
-     */
-    private boolean isEndCallReply(String text) {
-        if (text == null || text.isBlank()) return false;
-        String lower = text.toLowerCase();
-        // Explicit farewell markers
-        if (lower.contains("have a good day")) return true;
-        if (lower.contains("have a great day")) return true;
-        if (lower.contains("thanks for calling")) return true;
-        if (lower.contains("thank you for calling")) return true;
-        if (lower.endsWith("bye.") || lower.endsWith("bye!")) return true;
-        if (lower.endsWith("goodbye.") || lower.endsWith("goodbye!")) return true;
-        // "take care" + "bye/goodbye" in same reply
-        if (lower.contains("take care") && (lower.contains("bye") || lower.contains("goodbye"))) return true;
-        // "see you then" + "take care" (booking confirmation farewell)
-        if (lower.contains("see you then") && lower.contains("take care")) return true;
-        return false;
-    }
-
     private void handleMedia(String streamSid, JsonNode root) {
 
-        StreamState state = streams.get(streamSid);
+        StreamState state = streams.getIfPresent(streamSid);
         if (state == null || state.closed) return;
 
         String payload = root.path("media").path("payload").asText(null);
         if (payload == null) {
             log.warn("⚠ payload null");
+            return;
+        }
+
+        // Guard against oversized payloads (~75KB decoded)
+        if (payload.length() > 100_000) {
+            log.warn("⚠ Oversized media payload ({}), skipping", payload.length());
             return;
         }
 
@@ -171,7 +156,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
 
         state.buffer.write(frame, 0, frame.length);
 
-        boolean silent = energy < 8;
+        boolean silent = energy < conversationProps.getSilenceEnergyThreshold();
         if (silent) state.silenceFrames++;
         else state.silenceFrames = 0;
 
@@ -181,9 +166,10 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                 state.framesReceived, frame.length, energy, state.silenceFrames, size);
 
         boolean silenceTrigger =
-                state.silenceFrames >= SILENCE_FRAMES && size >= MIN_AUDIO_BYTES;
+                state.silenceFrames >= conversationProps.getSilenceFrameThreshold()
+                        && size >= conversationProps.getMinAudioBytes();
 
-        boolean overflowTrigger = size >= MAX_BUFFER_BYTES;
+        boolean overflowTrigger = size >= conversationProps.getMaxBufferBytes();
 
         if ((silenceTrigger || overflowTrigger) && !state.processing) {
 
@@ -195,105 +181,31 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             log.info("🎤 SPEECH DETECTED | bytes={} silenceTrigger={} overflow={}",
                     utterance.length, silenceTrigger, overflowTrigger);
 
-            processUtteranceAsync(streamSid, utterance, state);
+            processUtteranceAsync(utterance, state);
         }
     }
 
-    private void processUtteranceAsync(String streamSid, byte[] audio, StreamState state) {
+    private void processUtteranceAsync(byte[] audio, StreamState state) {
+
+        String callSid = state.callSid;
+        String fromNumber = state.fromNumber;
+        Long tenantId = state.tenantId;
 
         CompletableFuture.runAsync(() -> {
             try {
-
-                log.info("➡ Sending to STT | bytes={}", audio.length);
-
-                String userText = sttService.transcribe(audio);
-
-                if (StringUtils.isBlank(userText)) {
-                    log.warn("⚠ STT returned empty text");
-                    return;
-                }
-
-                String callSid = state.callSid;
-                String fromNumber = state.fromNumber;
-
-                log.info("🧑 USER SAID: {}", userText);
-
-                String trimmed = userText.trim();
-                conversationStore.appendUser(callSid, fromNumber, trimmed);
-
-                // Resume: history hydrates from conversation_history when in-memory is empty (e.g. stream reconnect)
-                List<ChatMessage> history = conversationStore.getHistory(callSid);
-
-                PendingActionDto pending = pendingActionService.getPending(callSid);
-                if (pending != null) {
-                    log.info("Pending action currently stored for call {}: intent={} awaitingConfirmation={}",
-                            callSid,
-                            pending.getIntent(),
-                            pending.isAwaitingConfirmation());
-                } else {
-                    log.info("No pending action currently stored for call {}", callSid);
-                }
-                YesNoResult yesNo = yesNoClassifier.classify(trimmed);
-
-                String aiText = null;
-
-                // Pending confirmation + user said yes → execute action (backend writes to DB only here)
-                if (pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.YES) {
-                    log.info("User confirmed pending action with YES for call {}", callSid);
-                    Optional<String> executed = confirmationExecutionService.execute(callSid, fromNumber, pending);
-                    if (executed.isPresent()) {
-                        aiText = executed.get();
-                        pendingActionService.clearPending(callSid);
-                        log.info("Pending action executed and cleared for call {}", callSid);
-                    }
-                }
-
-                // Pending + user said no → clear and acknowledge
-                if (aiText == null && pending != null && pending.isAwaitingConfirmation() && yesNo == YesNoResult.NO) {
-                    pendingActionService.clearPending(callSid);
-                    log.info("User rejected pending action with NO for call {} -> pending cleared", callSid);
-                    aiText = "No problem. What would you like to do?";
-                }
-
-                // Otherwise: LLM drives the flow; may set a new pending action when asking for confirmation
-                if (aiText == null) {
-                    LlmFlowService.FlowResponse response = llmFlowService.generateReply(callSid, fromNumber, history);
-                    aiText = response.getMessage();
-                    if (response.getAction() != null) {
-                        pendingActionService.setPending(callSid, response.getAction());
-                        log.info("Pending action set for call {}: intent={} doctorKey={} date={} time={} targetPatient={}",
-                                callSid,
-                                response.getAction().getIntent(),
-                                response.getAction().getDoctorKey(),
-                                response.getAction().getDate(),
-                                response.getAction().getTime(),
-                                response.getAction().getTargetPatientName());
-                    } else {
-                        log.info("No pending action set for call {} from this LLM turn", callSid);
-                    }
-                }
-
-                if (StringUtils.isBlank(aiText)) {
-                    log.warn("⚠ Empty AI reply");
-                    return;
-                }
-
-                log.info("🤖 AI REPLY: {}", aiText);
-                conversationStore.appendAssistant(callSid, fromNumber, aiText);
-
-                boolean endCall = isEndCallReply(aiText);
-
-                twilioService.speakResponse(callSid, aiText, endCall);
-                if (endCall) {
-                    pendingActionService.clearPending(callSid);
-                    callFromNumbers.remove(callSid);
-                }
-
+                orchestrator.processUtterance(callSid, fromNumber, tenantId, audio,
+                        endedCallSid -> callFromNumbers.invalidate(endedCallSid));
             } catch (Exception e) {
-                log.error("❌ PIPELINE ERROR", e);
+                log.error("❌ PIPELINE ERROR for call {}", callSid, e);
             } finally {
                 state.processing = false;
             }
+        }, voicePipelineExecutor)
+        .orTimeout(30, TimeUnit.SECONDS)
+        .exceptionally(ex -> {
+            log.error("⏱ Pipeline timed out or failed for call {}", callSid, ex);
+            state.processing = false;
+            return null;
         });
     }
 }

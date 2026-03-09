@@ -1,7 +1,9 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.config.ConversationProperties;
 import com.ai.receptionist.entity.*;
 import com.ai.receptionist.repository.*;
+import com.ai.receptionist.utils.LogSanitizer;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,39 +26,31 @@ public class AppointmentService {
     private final AppointmentSlotRepository slotRepository;
     private final PatientRepository patientRepository;
     private final AppointmentRepository appointmentRepository;
+    private final ConversationProperties conversationProps;
 
 
-    public List<Doctor> getAllDoctors() {
-        return doctorRepository.findByActiveTrue();
+    /** Get all active doctors for a specific tenant */
+    public List<Doctor> getAllDoctors(Long tenantId) {
+        return doctorRepository.findByTenantIdAndActiveTrue(tenantId);
     }
 
-    public Map<String, Map<String, List<String>>> getAvailableSlotsForNextWeek() {
+    /** Get available slots for the next week, scoped to a tenant */
+    public Map<String, Map<String, List<String>>> getAvailableSlotsForNextWeek(Long tenantId) {
 
         LocalDate today = LocalDate.now();
-        LocalDate end = today.plusDays(7);
+        LocalDate end = today.plusDays(conversationProps.getSlotLookAheadDays());
 
-        List<Doctor> doctors = getAllDoctors();
+        List<AppointmentSlot> allSlots = slotRepository.findAllAvailableSlotsByTenantId(
+                tenantId, today, end, AppointmentSlot.Status.AVAILABLE);
+
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
 
-        for (Doctor d : doctors) {
-
-            List<AppointmentSlot> slots =
-                    slotRepository.findByDoctorIdAndSlotDateBetweenAndStatus(
-                            d.getId(),
-                            today,
-                            end,
-                            AppointmentSlot.Status.AVAILABLE
-                    );
-
-            Map<String, List<String>> byDate = slots.stream()
-                    .sorted(Comparator.comparing(AppointmentSlot::getStartTime))
-                    .collect(Collectors.groupingBy(
-                            s -> s.getSlotDate().format(DateTimeFormatter.ISO_LOCAL_DATE),
-                            LinkedHashMap::new,
-                            Collectors.mapping(AppointmentSlot::getStartTime, Collectors.toList())
-                    ));
-
-            result.put(d.getKey(), byDate);
+        for (AppointmentSlot slot : allSlots) {
+            String doctorKey = slot.getDoctor().getKey();
+            String date = slot.getSlotDate().format(DateTimeFormatter.ISO_LOCAL_DATE);
+            result.computeIfAbsent(doctorKey, k -> new LinkedHashMap<>())
+                    .computeIfAbsent(date, k -> new ArrayList<>())
+                    .add(slot.getStartTime());
         }
 
         return result;
@@ -77,10 +71,11 @@ public class AppointmentService {
                         twilioPhone, patientName.trim(), Appointment.Status.CONFIRMED);
     }
 
+    /** Confirmed appointment summaries scoped to a tenant */
     @Transactional(readOnly = true)
-    public List<AppointmentSummary> getActiveAppointmentSummaries(String twilioPhone) {
+    public List<AppointmentSummary> getActiveAppointmentSummaries(String twilioPhone, Long tenantId) {
         List<Appointment> list = appointmentRepository
-                .findByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(twilioPhone, Appointment.Status.CONFIRMED);
+                .findConfirmedByPhoneAndTenantWithDetails(twilioPhone, tenantId);
         return list.stream()
                 .map(a -> new AppointmentSummary(
                         a.getPatient().getName(),
@@ -92,11 +87,11 @@ public class AppointmentService {
                 .collect(Collectors.toList());
     }
 
-    /** Upcoming appointments only: slot date >= today. Use for listing, cancel, reschedule so we never mention past appointments. */
+    /** Upcoming appointments only (slot date >= today), scoped to a tenant */
     @Transactional(readOnly = true)
-    public List<AppointmentSummary> getUpcomingAppointmentSummaries(String twilioPhone) {
+    public List<AppointmentSummary> getUpcomingAppointmentSummaries(String twilioPhone, Long tenantId) {
         LocalDate today = LocalDate.now();
-        return getActiveAppointmentSummaries(twilioPhone).stream()
+        return getActiveAppointmentSummaries(twilioPhone, tenantId).stream()
                 .filter(a -> a.slotDate != null && !a.slotDate.isBlank())
                 .filter(a -> {
                     try {
@@ -109,31 +104,32 @@ public class AppointmentService {
     }
 
     @Transactional(readOnly = true)
-    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone) {
-        List<AppointmentSummary> list = getActiveAppointmentSummaries(twilioPhone);
+    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone, Long tenantId) {
+        List<AppointmentSummary> list = getActiveAppointmentSummaries(twilioPhone, tenantId);
         return list.isEmpty() ? Optional.empty() : Optional.of(list.get(0));
     }
 
     @Transactional(readOnly = true)
-    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone, String patientName) {
-        if (patientName == null || patientName.isBlank()) return getActiveAppointmentSummary(twilioPhone);
-        Optional<Appointment> opt = appointmentRepository
-                .findFirstByPatient_TwilioPhoneAndPatient_NameIgnoreCaseAndStatusOrderByCreatedAtDesc(
-                        twilioPhone, patientName.trim(), Appointment.Status.CONFIRMED);
-        if (!opt.isPresent()) return Optional.empty();
-        Appointment a = opt.get();
-        return Optional.of(new AppointmentSummary(
-                a.getPatient().getName(),
-                a.getDoctor().getName(),
-                a.getDoctor().getKey(),
-                a.getSlot().getSlotDate().toString(),
-                a.getSlot().getStartTime()));
+    public Optional<AppointmentSummary> getActiveAppointmentSummary(String twilioPhone, String patientName, Long tenantId) {
+        if (patientName == null || patientName.isBlank()) return getActiveAppointmentSummary(twilioPhone, tenantId);
+        List<Appointment> list = appointmentRepository
+                .findConfirmedByPhoneAndTenantWithDetails(twilioPhone, tenantId);
+        return list.stream()
+                .filter(a -> a.getPatient() != null && a.getPatient().getName() != null
+                        && a.getPatient().getName().equalsIgnoreCase(patientName.trim()))
+                .findFirst()
+                .map(a -> new AppointmentSummary(
+                        a.getPatient().getName(),
+                        a.getDoctor().getName(),
+                        a.getDoctor().getKey(),
+                        a.getSlot().getSlotDate().toString(),
+                        a.getSlot().getStartTime()));
     }
 
-    /** Upcoming appointment by patient name; empty if not found or appointment is in the past. */
+    /** Upcoming appointment by patient name, scoped to a tenant */
     @Transactional(readOnly = true)
-    public Optional<AppointmentSummary> getUpcomingAppointmentSummary(String twilioPhone, String patientName) {
-        List<AppointmentSummary> upcoming = getUpcomingAppointmentSummaries(twilioPhone);
+    public Optional<AppointmentSummary> getUpcomingAppointmentSummary(String twilioPhone, String patientName, Long tenantId) {
+        List<AppointmentSummary> upcoming = getUpcomingAppointmentSummaries(twilioPhone, tenantId);
         if (patientName == null || patientName.isBlank()) {
             return upcoming.isEmpty() ? Optional.empty() : Optional.of(upcoming.get(0));
         }
@@ -165,6 +161,7 @@ public class AppointmentService {
 
     @Transactional
     public Optional<Appointment> bookAppointment(
+            Long tenantId,
             String twilioPhone,
             String patientName,
             String patientPhone,
@@ -173,13 +170,24 @@ public class AppointmentService {
             String time
     ) {
 
+        // Input validation
+        if (patientName != null && patientName.length() > 100) {
+            log.warn("Patient name too long ({} chars), truncating", patientName.length());
+            patientName = patientName.substring(0, 100);
+        }
+        if (patientPhone != null && !patientPhone.matches("[+\\d\\s\\-()]{0,20}")) {
+            log.warn("Invalid patient phone format: {}", LogSanitizer.maskPhone(patientPhone));
+            return Optional.empty();
+        }
+
+        // Tenant-scoped doctor lookup
         Doctor doctor =
                 doctorRepository
-                        .findByKeyIgnoreCaseAndActiveTrue(doctorKey)
+                        .findByKeyIgnoreCaseAndActiveTrueAndTenantId(doctorKey, tenantId)
                         .orElse(null);
 
         if (doctor == null) {
-            log.warn("Doctor not found: {}", doctorKey);
+            log.warn("Doctor not found: {} for tenant {}", doctorKey, tenantId);
             return Optional.empty();
         }
 
@@ -205,14 +213,16 @@ public class AppointmentService {
         }
 
         String name = StringUtils.hasText(patientName) ? patientName : "Unknown";
+        // Tenant-scoped patient lookup
         Patient patient = patientRepository
-                .findFirstByTwilioPhoneAndNameIgnoreCase(twilioPhone, name)
+                .findFirstByTwilioPhoneAndNameIgnoreCaseAndTenantId(twilioPhone, name, tenantId)
                 .orElse(null);
         if (patient == null) {
             patient = Patient.builder()
                     .name(name)
                     .phone(StringUtils.hasText(patientPhone) ? patientPhone : twilioPhone)
                     .twilioPhone(twilioPhone)
+                    .tenantId(tenantId)
                     .build();
         } else if (StringUtils.hasText(patientPhone)) {
             patient.setPhone(patientPhone);
@@ -228,19 +238,21 @@ public class AppointmentService {
                 .doctor(doctor)
                 .slot(slot)
                 .status(Appointment.Status.CONFIRMED)
+                .tenantId(tenantId)
                 .build();
 
         appointment = appointmentRepository.save(appointment);
 
         log.info(
-                "Booked appointment | apptId={} patientId={} name={} phone={} doctor={} date={} time={}",
+                "Booked appointment | apptId={} patientId={} name={} phone={} doctor={} date={} time={} tenant={}",
                 appointment.getId(),
                 patient.getId(),
-                patient.getName(),
-                patient.getPhone(),
+                LogSanitizer.maskName(patient.getName()),
+                LogSanitizer.maskPhone(patient.getPhone()),
                 doctor.getName(),
                 date,
-                time
+                time,
+                tenantId
         );
 
         return Optional.of(appointment);
@@ -248,13 +260,13 @@ public class AppointmentService {
 
 
     @Transactional
-    public boolean cancelAppointment(String twilioPhone) {
-        return cancelAppointment(twilioPhone, null);
+    public boolean cancelAppointment(Long tenantId, String twilioPhone) {
+        return cancelAppointment(tenantId, twilioPhone, null);
     }
 
     @Transactional
-    public boolean cancelAppointment(String twilioPhone, String patientName) {
-        Optional<Appointment> opt = getUpcomingAppointmentEntity(twilioPhone, patientName);
+    public boolean cancelAppointment(Long tenantId, String twilioPhone, String patientName) {
+        Optional<Appointment> opt = getUpcomingAppointmentEntity(tenantId, twilioPhone, patientName);
         if (!opt.isPresent()) return false;
 
         Appointment appt = opt.get();
@@ -265,32 +277,34 @@ public class AppointmentService {
         slot.setStatus(AppointmentSlot.Status.AVAILABLE);
         slotRepository.save(slot);
 
-        log.info("Cancelled appointment for {} ({})", twilioPhone, appt.getPatient().getName());
+        log.info("Cancelled appointment for {} ({})", LogSanitizer.maskPhone(twilioPhone), LogSanitizer.maskName(appt.getPatient().getName()));
         return true;
     }
 
     @Transactional
-    public Optional<Appointment> rescheduleAppointment(String twilioPhone, String doctorKey, String newDate, String newTime) {
-        return rescheduleAppointment(twilioPhone, null, doctorKey, newDate, newTime);
+    public Optional<Appointment> rescheduleAppointment(Long tenantId, String twilioPhone, String doctorKey, String newDate, String newTime) {
+        return rescheduleAppointment(tenantId, twilioPhone, null, doctorKey, newDate, newTime);
     }
 
     @Transactional
     public Optional<Appointment> rescheduleAppointment(
+            Long tenantId,
             String twilioPhone,
             String patientName,
             String doctorKey,
             String newDate,
             String newTime
     ) {
-        Optional<Appointment> existingOpt = getUpcomingAppointmentEntity(twilioPhone, patientName);
+        Optional<Appointment> existingOpt = getUpcomingAppointmentEntity(tenantId, twilioPhone, patientName);
         if (!existingOpt.isPresent()) return Optional.empty();
 
         Appointment existing = existingOpt.get();
         AppointmentSlot oldSlot = existing.getSlot();
 
+        // Tenant-scoped doctor lookup
         Doctor newDoctor =
                 doctorRepository
-                        .findByKeyIgnoreCaseAndActiveTrue(doctorKey)
+                        .findByKeyIgnoreCaseAndActiveTrueAndTenantId(doctorKey, tenantId)
                         .orElse(null);
 
         if (newDoctor == null) return Optional.empty();
@@ -326,7 +340,7 @@ public class AppointmentService {
 
         log.info(
                 "Rescheduled appointment for {} to {} {} {}",
-                twilioPhone,
+                LogSanitizer.maskPhone(twilioPhone),
                 newDoctor.getName(),
                 newDate,
                 newTime
@@ -336,14 +350,14 @@ public class AppointmentService {
     }
 
     /**
-     * Find the nearest upcoming confirmed appointment entity for this caller (and optional patient name).
-     * Only considers slots with slotDate >= today so we never cancel/reschedule past appointments.
+     * Find the nearest upcoming confirmed appointment entity, scoped to a tenant.
+     * Only considers slots with slotDate >= today.
      */
     @Transactional(readOnly = true)
-    private Optional<Appointment> getUpcomingAppointmentEntity(String twilioPhone, String patientName) {
+    private Optional<Appointment> getUpcomingAppointmentEntity(Long tenantId, String twilioPhone, String patientName) {
         LocalDate today = LocalDate.now();
         List<Appointment> list = appointmentRepository
-                .findByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(twilioPhone, Appointment.Status.CONFIRMED);
+                .findConfirmedByPhoneAndTenantWithDetails(twilioPhone, tenantId);
 
         return list.stream()
                 .filter(a -> a.getSlot() != null && a.getSlot().getSlotDate() != null
@@ -364,7 +378,6 @@ public class AppointmentService {
 
     /**
      * Normalizes time to 12-hour format with two-digit hour (e.g. 07:00 PM) to match DB slot startTime.
-     * Accepts 24h (e.g. 19:00), 12h (e.g. 7:00 PM), and " to " ranges (uses start part).
      */
     private static String normalizeTime(String time) {
         if (time == null) return null;
@@ -393,5 +406,24 @@ public class AppointmentService {
         }
 
         return t;
+    }
+
+    /**
+     * Find confirmed appointments for a given date that haven't been reminded yet.
+     */
+    @Transactional(readOnly = true)
+    public List<Appointment> getUnremindedAppointmentsForDate(LocalDate date) {
+        return appointmentRepository.findUnremindedForDate(date);
+    }
+
+    /**
+     * Mark an appointment as reminded so it won't be called again.
+     */
+    @Transactional
+    public void markReminded(Long appointmentId) {
+        appointmentRepository.findById(appointmentId).ifPresent(appt -> {
+            appt.setReminded(true);
+            appointmentRepository.save(appt);
+        });
     }
 }

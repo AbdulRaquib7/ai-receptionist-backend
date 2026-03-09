@@ -1,0 +1,216 @@
+package com.ai.receptionist.service;
+
+import com.ai.receptionist.component.ConversationStore;
+import com.ai.receptionist.dto.PendingActionDto;
+import com.ai.receptionist.entity.CallSession;
+import com.ai.receptionist.entity.ChatMessage;
+import com.ai.receptionist.exception.LlmException;
+import com.ai.receptionist.exception.SttException;
+import com.ai.receptionist.utils.LogSanitizer;
+import com.ai.receptionist.utils.YesNoResult;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
+
+/**
+ * Orchestrates the full conversation pipeline for a single user utterance:
+ * STT → context lookup → confirmation check → LLM reply → TTS → farewell detection.
+ *
+ * Extracted from MediaStreamHandler so that the WebSocket handler only deals with
+ * audio buffering and silence detection, while this service handles business logic.
+ */
+@Service
+@RequiredArgsConstructor
+public class ConversationOrchestrator {
+
+    private static final Logger log = LoggerFactory.getLogger(ConversationOrchestrator.class);
+
+    private final SttService sttService;
+    private final LlmFlowService llmFlowService;
+    private final PendingActionService pendingActionService;
+    private final ConfirmationExecutionService confirmationExecutionService;
+    private final YesNoClassifierService yesNoClassifier;
+    private final ConversationStore conversationStore;
+    private final TwilioService twilioService;
+    private final TenantService tenantService;
+    private final CallSessionService callSessionService;
+
+    /**
+     * Callback to allow the caller (MediaStreamHandler) to clean up state
+     * when the call ends (farewell detected).
+     */
+    @FunctionalInterface
+    public interface EndCallCallback {
+        void onEndCall(String callSid);
+    }
+
+    /**
+     * Processes a single audio utterance end-to-end.
+     *
+     * @param callSid         Twilio call SID
+     * @param fromNumber      Caller phone number
+     * @param tenantId        Tenant ID (resolved from inbound call)
+     * @param audio           Raw mu-law audio bytes from Twilio
+     * @param endCallCallback Called when the AI reply signals a farewell (call should hang up)
+     */
+    public void processUtterance(String callSid, String fromNumber, Long tenantId, byte[] audio, EndCallCallback endCallCallback) {
+
+        // --- STT ---
+        String userText;
+        try {
+            log.info("➡ Sending to STT | bytes={}", audio.length);
+            userText = sttService.transcribe(audio);
+        } catch (SttException e) {
+            log.error("STT failed for call {}: {}", callSid, e.getMessage());
+            twilioService.speakResponse(callSid,
+                    "I'm having trouble hearing you. Could you say that again?", false, tenantId);
+            return;
+        }
+
+        if (StringUtils.isBlank(userText)) {
+            log.warn("⚠ STT returned empty text");
+            return;
+        }
+
+        // Truncate excessively long transcriptions to prevent prompt injection / cost spikes
+        if (userText.length() > 2000) {
+            log.warn("User text truncated from {} to 2000 chars for call {}", userText.length(), callSid);
+            userText = userText.substring(0, 2000);
+        }
+
+        log.debug("🧑 USER SAID: {}", userText);
+        log.info("🧑 USER SAID: [{}]", LogSanitizer.truncateText(userText));
+
+        // Mark call as in-progress on first utterance
+        callSessionService.markInProgress(callSid);
+
+        String trimmed = userText.trim();
+        conversationStore.appendUser(callSid, fromNumber, trimmed);
+
+        // Resume: history hydrates from conversation_history when in-memory is empty (e.g. stream reconnect)
+        List<ChatMessage> history = conversationStore.getHistory(callSid);
+
+        // Atomic check-and-get: eliminates TOCTOU race between check and use
+        Optional<PendingActionDto> pendingOpt = pendingActionService.getIfAwaitingConfirmation(callSid);
+        if (pendingOpt.isPresent()) {
+            log.info("Pending action currently stored for call {}: intent={} awaitingConfirmation=true",
+                    callSid,
+                    pendingOpt.get().getIntent());
+        }
+        YesNoResult yesNo = yesNoClassifier.classify(trimmed);
+
+        String aiText = null;
+
+        // Pending confirmation + user said yes → execute action (backend writes to DB only here)
+        if (pendingOpt.isPresent() && yesNo == YesNoResult.YES) {
+            PendingActionDto pending = pendingOpt.get();
+            log.info("User confirmed pending action with YES for call {}", callSid);
+            Optional<String> executed = confirmationExecutionService.execute(callSid, fromNumber, tenantId, pending);
+            if (executed.isPresent()) {
+                aiText = executed.get();
+                pendingActionService.clearPending(callSid);
+                // Track outcome based on executed action
+                CallSession.Outcome outcome = mapIntentToOutcome(pending.getIntent());
+                callSessionService.setOutcome(callSid, outcome);
+                log.info("Pending action executed and cleared for call {}", callSid);
+            }
+        }
+
+        // Pending + user said no → clear and acknowledge
+        if (aiText == null && pendingOpt.isPresent() && yesNo == YesNoResult.NO) {
+            pendingActionService.clearPending(callSid);
+            aiText = "No problem. What would you like to do?";
+        }
+
+        // --- LLM ---
+        if (aiText == null) {
+            try {
+                LlmFlowService.FlowResponse response = llmFlowService.generateReply(callSid, fromNumber, tenantId, history);
+                aiText = response.getMessage();
+                if (response.getAction() != null) {
+                    pendingActionService.setPending(callSid, response.getAction());
+                }
+            } catch (LlmException e) {
+                log.error("LLM failed for call {}: {}", callSid, e.getMessage());
+                twilioService.speakResponse(callSid,
+                        "I'm having a quick technical moment. Could you repeat that?", false, tenantId);
+                return;
+            }
+        }
+
+        if (StringUtils.isBlank(aiText)) {
+            log.warn("⚠ Empty AI reply");
+            return;
+        }
+
+        log.debug("🤖 AI REPLY: {}", aiText);
+        log.info("🤖 AI REPLY: [{}]", LogSanitizer.truncateText(aiText));
+        conversationStore.appendAssistant(callSid, fromNumber, aiText);
+
+        boolean endCall = isEndCallReply(aiText, tenantId);
+
+        twilioService.speakResponse(callSid, aiText, endCall, tenantId);
+        if (endCall) {
+            pendingActionService.clearPending(callSid);
+            callSessionService.completeCall(callSid);
+            generateCallSummaryAsync(callSid, tenantId);
+            if (endCallCallback != null) {
+                endCallCallback.onEndCall(callSid);
+            }
+        }
+    }
+
+    /**
+     * Determines if the AI reply signals the end of the call.
+     * Uses tenant-configurable farewell phrases loaded from TenantService.
+     */
+    private boolean isEndCallReply(String text, Long tenantId) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase();
+        List<String> phrases = tenantService.getFarewellPhrases(tenantId);
+        return phrases.stream().anyMatch(lower::contains);
+    }
+
+    /**
+     * Asynchronously generates a call summary via LLM and stores it in the call session.
+     */
+    private void generateCallSummaryAsync(String callSid, Long tenantId) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                List<ChatMessage> history = conversationStore.getHistory(callSid);
+                if (history.isEmpty()) return;
+
+                String transcript = new java.util.ArrayList<>(history).stream()
+                        .map(m -> m.getRole() + ": " + m.getContent())
+                        .collect(Collectors.joining("\n"));
+
+                String summaryPrompt = "Summarize this phone call in 2-3 sentences. Include: " +
+                        "caller name (if known), intent, key details (date/time/doctor), " +
+                        "outcome (booked/cancelled/rescheduled/info only), and any follow-up needed.\n\n" +
+                        transcript;
+
+                String summary = llmFlowService.generateSummary(summaryPrompt);
+                if (summary != null && !summary.isBlank()) {
+                    callSessionService.setSummary(callSid, summary);
+                }
+            } catch (Exception e) {
+                log.error("[{}] Failed to generate call summary", callSid, e);
+            }
+        });
+    }
+
+    private CallSession.Outcome mapIntentToOutcome(PendingActionDto.Intent intent) {
+        return switch (intent) {
+            case BOOK -> CallSession.Outcome.BOOKED;
+            case CANCEL -> CallSession.Outcome.CANCELLED;
+            case RESCHEDULE -> CallSession.Outcome.RESCHEDULED;
+        };
+    }
+}

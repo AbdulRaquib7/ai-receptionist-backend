@@ -4,10 +4,11 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
+import com.ai.receptionist.dto.TwilioCredentials;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
@@ -21,40 +22,38 @@ public class TwilioService {
     private static final String TWILIO_API_BASE = "https://api.twilio.com/2010-04-01";
     private static final String SAY_PATH = "/twilio/voice/say";
 
-    @Value("${twilio.accountSid:${twilio.account-sid:}}")
-    private String accountSid;
-
-    @Value("${twilio.authToken:${twilio.auth-token:}}")
-    private String authToken;
-
-    @Value("${twilio.base-url:}")
+    @Value("${twilio.base-url}")
     private String baseUrl;
 
     private final RestTemplate restTemplate;
+    private final TenantService tenantService;
 
-    public TwilioService(RestTemplateBuilder builder) {
-        this.restTemplate = builder.build();
+    public TwilioService(@Qualifier("twilioRestTemplate") RestTemplate restTemplate,
+                         TenantService tenantService) {
+        this.restTemplate = restTemplate;
+        this.tenantService = tenantService;
     }
 
     /**
-     * Speak response without ending call
+     * Speak response without ending call (uses per-tenant Twilio credentials).
      */
-    public void speakResponse(String callSid, String text) {
-        speakResponse(callSid, text, false);
+    public void speakResponse(String callSid, String text, Long tenantId) {
+        speakResponse(callSid, text, false, tenantId);
     }
 
     /**
      * Speak response and optionally end call AFTER playback.
+     * Uses per-tenant Twilio credentials resolved via TenantService.
      */
-    public void speakResponse(String callSid, String text, boolean endCall) {
+    public void speakResponse(String callSid, String text, boolean endCall, Long tenantId) {
 
         if (callSid == null || text == null || text.isBlank()) {
             return;
         }
 
-        if (accountSid == null || accountSid.isBlank() ||
-            authToken == null || authToken.isBlank()) {
-            log.warn("Twilio credentials missing — skipping speakResponse");
+        TwilioCredentials creds = tenantService.getTwilioCredentials(tenantId);
+        if (!creds.isValid()) {
+            log.warn("Twilio credentials missing for tenantId={} — skipping speakResponse", tenantId);
             return;
         }
 
@@ -62,11 +61,11 @@ public class TwilioService {
             String sayUrl = buildSayUrl(text, endCall);
 
             String apiUrl = TWILIO_API_BASE +
-                    "/Accounts/" + accountSid +
+                    "/Accounts/" + creds.accountSid() +
                     "/Calls/" + callSid + ".json";
 
             HttpHeaders headers = new HttpHeaders();
-            headers.setBasicAuth(accountSid, authToken);
+            headers.setBasicAuth(creds.accountSid(), creds.authToken());
             headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 
             MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
@@ -89,23 +88,21 @@ public class TwilioService {
     }
 
     /**
-     * Force hangup call immediately
+     * Force hangup call immediately using per-tenant credentials.
      */
-    public void hangupCall(String callSid) {
+    public void hangupCall(String callSid, Long tenantId) {
         if (callSid == null || callSid.isBlank()) return;
 
-        if (accountSid == null || accountSid.isBlank() ||
-            authToken == null || authToken.isBlank()) {
-            return;
-        }
+        TwilioCredentials creds = tenantService.getTwilioCredentials(tenantId);
+        if (!creds.isValid()) return;
 
         try {
             String apiUrl = TWILIO_API_BASE +
-                    "/Accounts/" + accountSid +
+                    "/Accounts/" + creds.accountSid() +
                     "/Calls/" + callSid + ".json";
 
             HttpHeaders headers = new HttpHeaders();
-            headers.setBasicAuth(accountSid, authToken);
+            headers.setBasicAuth(creds.accountSid(), creds.authToken());
 
             MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
             body.add("Status", "completed");

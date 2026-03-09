@@ -1,18 +1,27 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.component.CallerPhoneResolver;
+import com.ai.receptionist.config.ConversationProperties;
 import com.ai.receptionist.dto.PendingActionDto;
 import com.ai.receptionist.entity.ChatMessage;
 import com.ai.receptionist.entity.Doctor;
+import com.ai.receptionist.exception.LlmException;
+import com.ai.receptionist.utils.LogSanitizer;
+import com.ai.receptionist.utils.SlotFormattingUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDate;
@@ -25,23 +34,39 @@ import java.util.*;
  * after confirmation; this service never writes to the database.
  */
 @Service
-@RequiredArgsConstructor
 public class LlmFlowService {
 
     private static final Logger log = LoggerFactory.getLogger(LlmFlowService.class);
 
-    private final RestTemplate restTemplate = new RestTemplateBuilder().build();
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final RestTemplate restTemplate;
+    private final ObjectMapper mapper;
     private final AppointmentService appointmentService;
+    private final CallerPhoneResolver callerPhoneResolver;
+    private final ConversationProperties conversationProps;
+    private final PromptService promptService;
+    private final TenantService tenantService;
 
-    @Value("${openai.api-key:}")
+    public LlmFlowService(@Qualifier("restTemplate") RestTemplate restTemplate,
+                           ObjectMapper objectMapper,
+                           AppointmentService appointmentService,
+                           CallerPhoneResolver callerPhoneResolver,
+                           ConversationProperties conversationProps,
+                           PromptService promptService,
+                           TenantService tenantService) {
+        this.restTemplate = restTemplate;
+        this.mapper = objectMapper;
+        this.appointmentService = appointmentService;
+        this.callerPhoneResolver = callerPhoneResolver;
+        this.conversationProps = conversationProps;
+        this.promptService = promptService;
+        this.tenantService = tenantService;
+    }
+
+    @Value("${openai.api-key}")
     private String openAiApiKey;
 
-    @Value("${openai.model:gpt-4o-mini}")
+    @Value("${openai.model}")
     private String openAiModel;
-
-    @Value("${caller.anonymous-fallback:+100000000}")
-    private String anonymousCallerFallback;
 
     public static class FlowResponse {
         private final String message;
@@ -61,28 +86,37 @@ public class LlmFlowService {
      * pending action (when LLM is asking user to confirm book/cancel/reschedule).
      * Slots and doctors are fetched dynamically from DB; never hardcoded.
      */
-    public FlowResponse generateReply(String callSid, String fromNumber, List<ChatMessage> history) {
+    @Retryable(
+            retryFor = {ResourceAccessException.class, HttpServerErrorException.class},
+            noRetryFor = {HttpClientErrorException.class},
+            maxAttempts = 2,
+            backoff = @Backoff(delay = 500)
+    )
+    public FlowResponse generateReply(String callSid, String fromNumber, Long tenantId, List<ChatMessage> history) {
         if (StringUtils.isBlank(openAiApiKey)) {
-            log.error("OPENAI_API_KEY is not set");
-            return new FlowResponse("I'm having a quick technical moment. Can you say that again?", null);
+            throw new LlmException("OPENAI_API_KEY is not set", null);
         }
 
-        String context = buildContext(fromNumber);
+        String context = buildContext(fromNumber, tenantId);
         String outputFormat = buildOutputFormatInstructions();
 
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", context + "\n\n" + outputFormat));
 
-        for (ChatMessage msg : history) {
+        // Limit history to prevent unbounded token growth on long calls
+        int maxMessages = conversationProps.getMaxLlmHistoryMessages();
+        List<ChatMessage> recentHistory = history.size() > maxMessages
+                ? history.subList(history.size() - maxMessages, history.size())
+                : history;
+
+        for (ChatMessage msg : recentHistory) {
             messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
         }
 
         Map<String, Object> body = new HashMap<>();
         body.put("model", openAiModel != null ? openAiModel : "gpt-4o-mini");
-        body.put("temperature", 0.2);
+        body.put("temperature", conversationProps.getLlmTemperature());
         body.put("messages", messages);
-        // Force the model to return valid JSON so parsing is reliable.
-        body.put("response_format", Map.of("type", "json_object"));
 
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -95,31 +129,38 @@ public class LlmFlowService {
             );
             JsonNode root = mapper.readTree(response.getBody());
             String content = root.path("choices").path(0).path("message").path("content").asText("").trim();
-            log.info("LLM RAW RESPONSE for call {}: {}", callSid, content);
-            FlowResponse parsed = parseStructuredResponse(content);
-            if (parsed.getAction() != null) {
-                log.info("LlmFlowService: structured action present for call {} -> intent={}",
-                        callSid, parsed.getAction().getIntent());
-            } else {
-                log.info("LlmFlowService: no structured action returned for call {}", callSid);
-            }
-            return parsed;
+            log.debug("LLM RAW RESPONSE for call {}: {}", callSid, content);
+            log.info("LLM response received for call {} [{}]", callSid, LogSanitizer.truncateText(content));
+            return parseStructuredResponse(content);
+        } catch (HttpClientErrorException e) {
+            throw new LlmException("LLM authentication/client error: " + e.getStatusCode(), e);
+        } catch (ResourceAccessException e) {
+            throw new LlmException("LLM service unreachable", e);
+        } catch (HttpServerErrorException e) {
+            throw new LlmException("LLM server error: " + e.getStatusCode(), e);
         } catch (Exception ex) {
-            log.error("LlmFlowService: LLM call failed", ex);
-            return new FlowResponse("Sorry, I didn't catch that. Could you repeat?", null);
+            throw new LlmException("LLM call failed", ex);
         }
     }
 
-    private String buildContext(String fromNumber) {
+    private String buildContext(String fromNumber, Long tenantId) {
         String today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
+
+        // Build template variables for {{placeholder}} substitution
+        Map<String, String> vars = buildTemplateVariables(tenantId);
+
         StringBuilder ctx = new StringBuilder();
-        ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n");
-        ctx.append("CURRENT TIME (24h, clinic local time): ")
-                .append(java.time.LocalTime.now().withSecond(0).withNano(0).toString())
-                .append(". Use this to decide if today's remaining slots are still valid.\n\n");
+        ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n\n");
+
+        // Tenant-specific persona (from DB templates)
+        String persona = promptService.renderTemplate(tenantId, "system_persona",
+                "You are a friendly virtual receptionist. Short, warm, conversational.", vars);
+        ctx.append(persona).append("\n\n");
+
+        // Dynamic data: doctors, slots, appointments
         ctx.append("DATABASE STATE (single source of truth; slots from appointment_slot WHERE status=AVAILABLE):\n\n");
 
-        List<Doctor> doctors = appointmentService.getAllDoctors();
+        List<Doctor> doctors = appointmentService.getAllDoctors(tenantId);
         ctx.append("DOCTORS:\n");
         for (Doctor d : doctors) {
             ctx.append("- key: ").append(d.getKey()).append(", name: ").append(d.getName());
@@ -129,23 +170,23 @@ public class LlmFlowService {
             ctx.append("\n");
         }
 
-        Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek();
+        Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek(tenantId);
         ctx.append("\nAVAILABLE SLOTS (dynamic; never invent):\n");
         slots.forEach((docKey, byDate) -> {
             ctx.append(docKey).append(": ");
             List<String> parts = new ArrayList<>();
             byDate.forEach((date, times) -> {
                 if (times != null && !times.isEmpty()) {
-                    parts.add(date + " " + LlmService.formatSlotsAsRanges(times));
+                    parts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
                 }
             });
             ctx.append(String.join("; ", parts)).append("\n");
         });
 
-        String resolvedPhone = resolveCallerForLookup(fromNumber);
+        String resolvedPhone = callerPhoneResolver.resolve(fromNumber);
         List<AppointmentService.AppointmentSummary> appointments =
                 StringUtils.isNotBlank(resolvedPhone)
-                        ? appointmentService.getUpcomingAppointmentSummaries(resolvedPhone)
+                        ? appointmentService.getUpcomingAppointmentSummaries(resolvedPhone, tenantId)
                         : List.of();
         if (!appointments.isEmpty()) {
             ctx.append("\nCALLER'S UPCOMING APPOINTMENTS: ");
@@ -160,21 +201,41 @@ public class LlmFlowService {
             ctx.append("\nCALLER HAS NO UPCOMING APPOINTMENTS.\n");
         }
 
-        ctx.append("\nVOICE & RULES:\n");
-        ctx.append("- You are a real human receptionist. Short, warm, conversational. No robotic phrases.\n");
-        ctx.append("- Primary language is English. Always reply in English. If the caller speaks another language (Spanish, Hindi, etc.), reply in English and politely ask them to repeat in English (for example: \"Could you please say that in English so I can help you properly?\").\n");
-        ctx.append("- Answer general questions briefly, then return to flow: \"Now, about your appointment…\". Never book or cancel an appointment for pure general questions.\n");
-        ctx.append("- When offering times, prefer slots for TODAY and TOMORROW only. Use AVAILABLE SLOTS above as the single source of truth; never invent times.\n");
-        ctx.append("- For TODAY, ignore any times that are earlier than the CURRENT TIME. If all of today's slots are already in the past, say that today is fully booked and offer TOMORROW and the day after (using the actual future slots from the list).\n");
-        ctx.append("- AVAILABLE SLOTS are exact truth. If a specific time appears in AVAILABLE SLOTS for that doctor and date, you MUST treat it as available and you must NOT say it is unavailable. If the user asks for a time that does NOT appear in AVAILABLE SLOTS, explain it is not available and offer nearby times or other days from the list.\n");
-        ctx.append("- BOOK: suggest doctor → read slot options from the list (grouped today/tomorrow) → collect name & phone → ask confirmation.\n");
-        ctx.append("- CANCEL/RESCHEDULE: use caller's upcoming appointments above; confirm which one; ask confirmation.\n");
-        ctx.append("- Phone number: if the contact number sounds incomplete, missing digits, or unclear, politely ask the caller again for the full number and confirm it before proceeding to book.\n");
-        ctx.append("- CONFIRMATION & ACTIONS: Whenever your message asks the caller to confirm a specific booking/cancel/reschedule (for example: \"Should I go ahead and book that?\", \"Would you like to reschedule that one?\"), you MUST include the \"action\" block in your JSON with the correct intent and all known details. This is the ONLY time you set a non-null action.\n");
-        ctx.append("- Pending decisions and hangup: If you have just proposed a specific booking/cancel/reschedule and are waiting for a yes/no, and the caller says they want to end the call (e.g. \"bye\", \"see ya\", \"that's all\", \"hang up\"), do NOT end the call immediately. First, respond in English like: \"Before we end the call, do you want me to [book/cancel/reschedule] it? Say yes to confirm, or no to end the call.\" and include the same action object again. Only after the caller clearly answers yes or no should you either proceed with the action or end with the goodbye.\n");
-        ctx.append("- Goodbye: \"Thanks for calling. Take care!\" Only when there are no pending booking/cancel/reschedule decisions and the user clearly wants to end the call.\n");
-        ctx.append("- Unclear: \"Sorry, I didn't catch that. Could you repeat?\"\n");
+        // Tenant-specific rules (from DB templates)
+        String rules = promptService.renderTemplate(tenantId, "system_rules",
+                "- Always confirm before executing any action.\n- Never invent data.", vars);
+        ctx.append("\n").append(rules).append("\n");
+
+        // Tenant-specific conversation flows (from DB templates)
+        String flows = promptService.renderTemplate(tenantId, "system_flows", "", vars);
+        if (!flows.isBlank()) {
+            ctx.append("\n").append(flows).append("\n");
+        }
+
         return ctx.toString();
+    }
+
+    /**
+     * Builds the standard template variable map for a tenant.
+     */
+    private Map<String, String> buildTemplateVariables(Long tenantId) {
+        Map<String, String> vars = new HashMap<>();
+        if (tenantId != null) {
+            String businessName = tenantService.getTenantName(tenantId);
+            vars.put("business_name", businessName != null ? businessName : "our office");
+            vars.put("ai_name", tenantService.getConfig(tenantId, "ai_name", "Sarah"));
+            vars.put("supported_actions", tenantService.getConfig(tenantId, "supported_actions",
+                    "book, reschedule, or cancel appointments"));
+            vars.put("business_hours", tenantService.getConfig(tenantId, "business_hours", ""));
+            vars.put("business_address", tenantService.getConfig(tenantId, "business_address", ""));
+        } else {
+            vars.put("business_name", "our office");
+            vars.put("ai_name", "Sarah");
+            vars.put("supported_actions", "book, reschedule, or cancel appointments");
+            vars.put("business_hours", "");
+            vars.put("business_address", "");
+        }
+        return vars;
     }
 
     private String buildOutputFormatInstructions() {
@@ -182,22 +243,9 @@ public class LlmFlowService {
                 + "{\"message\": \"your natural reply here\", \"action\": null}\n"
                 + "When asking user to CONFIRM a booking, set action to (time must be 12-hour with AM/PM, e.g. 07:00 PM not 19:00):\n"
                 + "{\"intent\": \"BOOK\", \"doctorKey\": \"<key from DOCTORS>\", \"date\": \"YYYY-MM-DD\", \"time\": \"07:00 PM\", \"patientName\": \"...\", \"patientPhone\": \"...\"}\n"
-                + "When asking to CONFIRM cancel: {\"intent\": \"CANCEL\", \"targetPatientName\": \"<patient name from CALLER'S UPCOMING APPOINTMENTS, not the doctor>\"}\n"
-                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"<patient name>\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"07:00 PM\"}\n"
+                + "When asking to CONFIRM cancel: {\"intent\": \"CANCEL\", \"targetPatientName\": \"...\"}\n"
+                + "When asking to CONFIRM reschedule: {\"intent\": \"RESCHEDULE\", \"targetPatientName\": \"...\", \"doctorKey\": \"...\", \"newDate\": \"YYYY-MM-DD\", \"newTime\": \"07:00 PM\"}\n"
                 + "Use exact doctorKey, date and time from the context. If not asking for confirmation, set \"action\" to null. Never concatenate JSON after the message text — output only the one JSON object.";
-    }
-
-    private String resolveCallerForLookup(String fromNumber) {
-        if (fromNumber == null || fromNumber.isBlank()
-                || fromNumber.startsWith("client:")
-                || "anonymous".equalsIgnoreCase(fromNumber.trim())
-                || "unknown".equalsIgnoreCase(fromNumber.trim())) {
-            String fallback = StringUtils.isNotBlank(anonymousCallerFallback)
-                    ? anonymousCallerFallback.trim()
-                    : "+100000000";
-            return fallback;
-        }
-        return fromNumber;
     }
 
     /**
@@ -309,7 +357,9 @@ public class LlmFlowService {
                     .build();
             log.info("Parsed LLM action: intent={} doctorKey={} date={} time={} patientName={} targetPatient={} newDate={} newTime={}",
                     intent, action.getDoctorKey(), action.getDate(), action.getTime(),
-                    action.getPatientName(), action.getTargetPatientName(), action.getNewDate(), action.getNewTime());
+                    LogSanitizer.maskName(action.getPatientName()),
+                    LogSanitizer.maskName(action.getTargetPatientName()),
+                    action.getNewDate(), action.getNewTime());
             return action;
         } catch (IllegalArgumentException e) {
             log.warn("Unknown intent in LLM action: {}", intentStr);
@@ -338,5 +388,43 @@ public class LlmFlowService {
 
     private static String nullIfEmpty(String s) {
         return s == null || s.isBlank() ? null : s.trim();
+    }
+
+    /**
+     * Simple LLM call for generating a post-call summary.
+     * No structured output, no action parsing — just plain text summarization.
+     */
+    public String generateSummary(String summaryPrompt) {
+        if (StringUtils.isBlank(openAiApiKey)) {
+            log.warn("Cannot generate summary: OPENAI_API_KEY is not set");
+            return null;
+        }
+
+        List<Map<String, String>> messages = List.of(
+                Map.of("role", "system", "content", "You are a concise call summarizer. Summarize phone calls in 2-3 sentences."),
+                Map.of("role", "user", "content", summaryPrompt)
+        );
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("model", openAiModel != null ? openAiModel : "gpt-4o-mini");
+        body.put("temperature", 0.3);
+        body.put("max_tokens", 200);
+        body.put("messages", messages);
+
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBearerAuth(openAiApiKey);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    "https://api.openai.com/v1/chat/completions",
+                    new HttpEntity<>(body, headers),
+                    String.class
+            );
+            JsonNode root = mapper.readTree(response.getBody());
+            return root.path("choices").path(0).path("message").path("content").asText("").trim();
+        } catch (Exception e) {
+            log.error("Failed to generate call summary: {}", e.getMessage());
+            return null;
+        }
     }
 }

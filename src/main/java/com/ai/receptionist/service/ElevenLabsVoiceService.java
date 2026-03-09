@@ -1,14 +1,19 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.exception.TtsException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.http.*;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -25,28 +30,35 @@ public class ElevenLabsVoiceService {
     private static final String CONTENT_TYPE_JSON = "application/json";
 
     private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    @Value("${elevenlabs.api-key:}")
+    @Value("${elevenlabs.api-key}")
     private String apiKey;
 
-    @Value("${elevenlabs.voice-id:}")
+    @Value("${elevenlabs.voice-id}")
     private String voiceId;
 
-    public ElevenLabsVoiceService(RestTemplateBuilder builder) {
-        this.restTemplate = builder.build();
+    public ElevenLabsVoiceService(@Qualifier("ttsRestTemplate") RestTemplate restTemplate, ObjectMapper objectMapper) {
+        this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * Synthesize speech from text. Returns MP3 bytes or empty array on failure.
+     * Synthesize speech from text. Returns MP3 bytes.
+     * Throws TtsException on failure so callers can fall back to Twilio's built-in TTS.
      */
+    @Retryable(
+            retryFor = {ResourceAccessException.class, HttpServerErrorException.class},
+            noRetryFor = {HttpClientErrorException.class},
+            maxAttempts = 2,
+            backoff = @Backoff(delay = 300)
+    )
     public byte[] synthesize(String text) {
         if (text == null || text.isBlank()) {
             return new byte[0];
         }
         if (apiKey == null || apiKey.isBlank()) {
-            log.warn("ElevenLabs api-key not set — skipping TTS");
-            return new byte[0];
+            throw new TtsException("ElevenLabs api-key not set", null);
         }
         String url = String.format(TTS_URL, voiceId != null ? voiceId : "21m00Tcm4TlvDq8ikWAM");
         HttpHeaders headers = new HttpHeaders();
@@ -71,12 +83,17 @@ public class ElevenLabsVoiceService {
                 log.debug("ElevenLabs TTS OK, bytes={}", response.getBody().length);
                 return response.getBody();
             }
-            log.warn("ElevenLabs TTS non-2xx status: {}", response.getStatusCode());
-        } catch (HttpClientErrorException.Unauthorized e) {
-            log.error("ElevenLabs TTS returned 401 Unauthorized. Check elevenlabs.api-key and voice-id configuration. See https://elevenlabs.io for API key management.");
+            throw new TtsException("ElevenLabs returned non-2xx status", null);
+        } catch (HttpClientErrorException e) {
+            throw new TtsException("TTS authentication/client error: " + e.getStatusCode(), e);
+        } catch (ResourceAccessException e) {
+            throw new TtsException("TTS service unreachable", e);
+        } catch (HttpServerErrorException e) {
+            throw new TtsException("TTS server error: " + e.getStatusCode(), e);
+        } catch (TtsException e) {
+            throw e;
         } catch (Exception e) {
-            log.error("ElevenLabs TTS failed: {}", e.getMessage());
+            throw new TtsException("TTS synthesis failed", e);
         }
-        return new byte[0];
     }
 }

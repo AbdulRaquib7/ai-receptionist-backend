@@ -26,6 +26,9 @@ public class Patient {
     @Column(name = "twilio_phone", length = 30)
     private String twilioPhone;
 
+    @Column(name = "tenant_id", nullable = false)
+    private Long tenantId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private java.time.Instant createdAt;
 

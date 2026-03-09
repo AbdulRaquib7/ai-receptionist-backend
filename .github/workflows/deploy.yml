@@ -1,0 +1,68 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: impekable-front-desk
+  ARTIFACT_REGISTRY_REPO: github
+  IMAGE_NAME: ai-receptionist
+  REGION: us-east1
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Enable Google Cloud APIs
+        run: |-
+          gcloud services enable run.googleapis.com artifactregistry.googleapis.com
+
+      - name: Configure Docker to use Artifact Registry
+        run: |-
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Build and push Docker image to Artifact Registry
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |-
+          docker build --file ./Dockerfile \
+            -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${IMAGE_NAME}:${IMAGE_TAG} .
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${IMAGE_NAME}:${IMAGE_TAG}
+
+      - name: Deploy to Cloud Run
+        run: |-
+          gcloud run deploy ${{ env.IMAGE_NAME }} \
+            --image ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REGISTRY_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-secrets="SPRING_DATASOURCE_PASSWORD=DB_PASS:latest" \
+            --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest" \
+            --set-secrets="ELEVENLABS_API_KEY=ELEVENLABS_API_KEY:latest" \
+            --set-secrets="TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest" \
+            --set-secrets="TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest" \
+            --set-secrets="TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest" \
+            --set-secrets="TWILIO_MEDIA_STREAM_URL=TWILIO_MEDIA_STREAM_URL:latest" \
+            --set-secrets="TWILIO_BASE_URL=TWILIO_BASE_URL:latest" \
+            --set-secrets="OPENAI_MODEL=OPENAI_MODEL:latest" \
+            --set-secrets="ELEVENLABS_VOICE_ID=ELEVENLABS_VOICE_ID:latest" \
+            --set-secrets="ELEVENLABS_VOICE_ENABLED=ELEVENLABS_VOICE_ENABLED:latest" \
+            --set-secrets="GCP_SQL_INSTANCE_CONNECTION=GCP_SQL_INSTANCE_CONNECTION:latest" \
+            --set-secrets="GCP_SQL_USERNAME=GCP_SQL_USERNAME:latest" \
+            --set-secrets="GCP_SQL_DATABASE=GCP_SQL_DATABASE:latest"

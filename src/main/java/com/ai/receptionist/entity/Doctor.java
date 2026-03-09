@@ -32,4 +32,7 @@ public class Doctor {
 
     @Column(nullable = false)
     private boolean active = true;
+
+    @Column(name = "tenant_id", nullable = false)
+    private Long tenantId;
 }
