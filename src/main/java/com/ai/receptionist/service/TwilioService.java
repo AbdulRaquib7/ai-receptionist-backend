@@ -13,6 +13,7 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 @Service
@@ -82,6 +83,15 @@ public class TwilioService {
                         response.getStatusCode(), callSid);
             }
 
+        } catch (HttpClientErrorException e) {
+            // 21220 = "Call is not in-progress" — caller hung up before AI response was ready.
+            // This is a normal race condition, not an error.
+            if (e.getStatusCode().value() == 400
+                    && e.getResponseBodyAsString().contains("21220")) {
+                log.info("Call {} already ended (caller hung up) — skipping speak response", callSid);
+            } else {
+                log.error("Twilio client error for call {}: {}", callSid, e.getMessage());
+            }
         } catch (Exception e) {
             log.error("Failed to send Twilio speak response for call {}", callSid, e);
         }
@@ -114,6 +124,13 @@ public class TwilioService {
 
             log.info("Call terminated: {}", callSid);
 
+        } catch (HttpClientErrorException e) {
+            if (e.getStatusCode().value() == 400
+                    && e.getResponseBodyAsString().contains("21220")) {
+                log.info("Call {} already ended — hangup not needed", callSid);
+            } else {
+                log.warn("Failed to hang up call {}: {}", callSid, e.getMessage());
+            }
         } catch (Exception e) {
             log.warn("Failed to hang up call {}: {}", callSid, e.getMessage());
         }

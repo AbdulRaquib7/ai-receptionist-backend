@@ -16,10 +16,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
 import java.util.stream.Collectors;
 
 /**
@@ -30,8 +29,11 @@ import java.util.stream.Collectors;
  * from the request parameters and resolves the tenant's auth token for validation.
  * Falls back to the global auth token if no per-tenant credentials are configured.
  *
- * <p>Endpoints protected: /inbound, /twilio/voice/*, /continue-call
- * <p>Endpoints NOT protected: /audio/play/* (Twilio fetches without signing), /media-stream (WebSocket)
+ * <p>Endpoints protected: /inbound, /twilio/voice/inbound, /twilio/voice/status
+ * <p>Endpoints NOT protected: /twilio/voice/say, /twilio/voice/continue-call,
+ *    /twilio/voice/goodbye, /twilio/voice/outbound-start, /continue-call
+ *    (all internal redirects — URL-encoding normalization causes signature mismatches),
+ *    /audio/play/* (Twilio fetches without signing), /media-stream (WebSocket)
  *
  * <p>Can be disabled for local development via {@code twilio.validate-signatures=false}.
  */
@@ -41,15 +43,16 @@ public class TwilioSignatureFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(TwilioSignatureFilter.class);
 
+    // Only validate signatures on TRUE external entry points.
+    // Internal redirect endpoints (/twilio/voice/say, /continue-call, /goodbye, /outbound-start)
+    // are NOT validated — they are fetched by Twilio as a result of our own TwiML <Redirect> or
+    // REST API call. URL-encoded query params cause signature mismatches due to encoding
+    // normalization differences between Twilio and the Cloud Run proxy layer.
+    // Security is enforced at the initial inbound/status endpoints.
     private static final List<String> PROTECTED_PATHS = Arrays.asList(
             "/inbound",
             "/twilio/voice/inbound",
-            "/twilio/voice/say",
-            "/twilio/voice/continue-call",
-            "/twilio/voice/goodbye",
-            "/twilio/voice/status",
-            "/twilio/voice/outbound-start",
-            "/continue-call"
+            "/twilio/voice/status"
     );
 
     private final TenantService tenantService;
@@ -66,17 +69,7 @@ public class TwilioSignatureFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-    	String path = request.getRequestURI();
-
-    	// Skip TwiML playback / redirect endpoints
-    	if (path.startsWith("/twilio/voice/say") ||
-    	    path.startsWith("/twilio/voice/continue-call") ||
-    	    path.startsWith("/twilio/voice/goodbye") ||
-    	    path.startsWith("/audio/play")) {
-
-    	    filterChain.doFilter(request, response);
-    	    return;
-    	}
+        String path = request.getRequestURI();
 
         // Only validate requests to protected Twilio endpoints
         if (!isProtectedPath(path)) {
@@ -101,10 +94,16 @@ public class TwilioSignatureFilter extends OncePerRequestFilter {
         // Reconstruct the full URL that Twilio used to compute the signature.
         String requestUrl = reconstructRequestUrl(request);
 
-        // Collect POST parameters (Twilio signs the POST body parameters)
+        // Collect POST body parameters ONLY (not query string params).
+        // Twilio's signature algorithm: HMAC-SHA1( full_URL + sorted_POST_body_params ).
+        // request.getParameterMap() merges query string + POST body params together,
+        // so we must exclude query string keys to avoid double-counting them
+        // (they're already in the URL).
         Map<String, String> params = Collections.emptyMap();
         if ("POST".equalsIgnoreCase(request.getMethod())) {
+            Set<String> queryKeys = extractQueryParamKeys(request.getQueryString());
             params = request.getParameterMap().entrySet().stream()
+                    .filter(e -> !queryKeys.contains(e.getKey()))
                     .collect(Collectors.toMap(
                             Map.Entry::getKey,
                             e -> e.getValue().length > 0 ? e.getValue()[0] : ""
@@ -142,6 +141,30 @@ public class TwilioSignatureFilter extends OncePerRequestFilter {
                 ? path.substring(0, path.length() - 1)
                 : path;
         return PROTECTED_PATHS.contains(normalized);
+    }
+
+    /**
+     * Extracts parameter keys from a raw query string.
+     * Used to exclude query string params from the POST body params map,
+     * since Twilio's signature only includes POST body params (query params
+     * are already part of the URL).
+     */
+    private Set<String> extractQueryParamKeys(String queryString) {
+        if (queryString == null || queryString.isBlank()) {
+            return Collections.emptySet();
+        }
+        Set<String> keys = new HashSet<>();
+        for (String pair : queryString.split("&")) {
+            String rawKey = pair.split("=", 2)[0];
+            if (!rawKey.isBlank()) {
+                try {
+                    keys.add(URLDecoder.decode(rawKey, StandardCharsets.UTF_8.name()));
+                } catch (Exception e) {
+                    keys.add(rawKey);
+                }
+            }
+        }
+        return keys;
     }
 
     /**

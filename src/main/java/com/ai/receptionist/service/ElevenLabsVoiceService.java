@@ -15,7 +15,6 @@ import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -27,7 +26,6 @@ public class ElevenLabsVoiceService {
 
     private static final Logger log = LoggerFactory.getLogger(ElevenLabsVoiceService.class);
     private static final String TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/%s";
-    private static final String CONTENT_TYPE_JSON = "application/json";
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -57,34 +55,44 @@ public class ElevenLabsVoiceService {
         if (text == null || text.isBlank()) {
             return new byte[0];
         }
-        if (apiKey == null || apiKey.isBlank()) {
+
+        // Trim to handle whitespace/quotes from env vars
+        String key = apiKey != null ? apiKey.trim() : "";
+        if (key.isEmpty()) {
             throw new TtsException("ElevenLabs api-key not set", null);
         }
-        String url = String.format(TTS_URL, voiceId != null ? voiceId : "21m00Tcm4TlvDq8ikWAM");
-        HttpHeaders headers = new HttpHeaders();
-        headers.set("xi-api-key", apiKey);
-        headers.setContentType(MediaType.parseMediaType(CONTENT_TYPE_JSON));
-        headers.setAccept(java.util.List.of(MediaType.parseMediaType("audio/mpeg")));
 
-        Map<String, Object> body = new HashMap<>();
-        body.put("text", text);
-        body.put("model_id", "eleven_multilingual_v2");
+        String vid = voiceId != null ? voiceId.trim() : "21m00Tcm4TlvDq8ikWAM";
+        String url = String.format(TTS_URL, vid);
 
         try {
-            String jsonBody = objectMapper.writeValueAsString(body);
+            String jsonBody = objectMapper.writeValueAsString(Map.of(
+                    "text", text,
+                    "model_id", "eleven_multilingual_v2"
+            ));
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("xi-api-key", key);
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setAccept(java.util.List.of(MediaType.parseMediaType("audio/mpeg")));
+
             HttpEntity<String> request = new HttpEntity<>(jsonBody, headers);
-            ResponseEntity<byte[]> response = restTemplate.exchange(
-                    url,
+
+            ResponseEntity<byte[]> response = restTemplate.exchange(url,
                     HttpMethod.POST,
                     request,
                     byte[].class
             );
+
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                 log.debug("ElevenLabs TTS OK, bytes={}", response.getBody().length);
                 return response.getBody();
             }
             throw new TtsException("ElevenLabs returned non-2xx status", null);
         } catch (HttpClientErrorException e) {
+            log.error("ElevenLabs client error {}: {} | key prefix: {}...",
+                    e.getStatusCode(), e.getResponseBodyAsString(),
+                    key.substring(0, Math.min(8, key.length())));
             throw new TtsException("TTS authentication/client error: " + e.getStatusCode(), e);
         } catch (ResourceAccessException e) {
             throw new TtsException("TTS service unreachable", e);
