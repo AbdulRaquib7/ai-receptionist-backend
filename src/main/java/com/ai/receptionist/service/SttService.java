@@ -1,58 +1,65 @@
 package com.ai.receptionist.service;
 
+import com.ai.receptionist.exception.SttException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestTemplate;
 
 import javax.sound.sampled.*;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 
-/**
- * Speech-to-Text using OpenAI Whisper.
- * Converts Twilio μ-law audio → PCM WAV before transcription.
- */
 @Service
 public class SttService {
 
     private static final Logger log = LoggerFactory.getLogger(SttService.class);
 
     private final RestTemplate restTemplate;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
 
-    @Value("${openai.api-key:${OPENAI_API_KEY:}}")
+    @Value("${openai.api-key}")
     private String openAiApiKey;
 
-    public SttService(RestTemplateBuilder builder) {
-        this.restTemplate = builder.build();
+    public SttService(@Qualifier("sttRestTemplate") RestTemplate restTemplate, ObjectMapper objectMapper) {
+        this.restTemplate = restTemplate;
+        this.objectMapper = objectMapper;
     }
 
+    @Retryable(
+            retryFor = {ResourceAccessException.class, HttpServerErrorException.class},
+            noRetryFor = {HttpClientErrorException.class},
+            maxAttempts = 2,
+            backoff = @Backoff(delay = 500)
+    )
     public String transcribe(byte[] mulawAudio) {
 
         if (StringUtils.isBlank(openAiApiKey)) {
-            log.error("OPENAI_API_KEY is not set");
-            return "";
+            throw new SttException("OPENAI_API_KEY is not set", null);
         }
 
         try {
             byte[] wavAudio = convertMulawToWav(mulawAudio);
 
             String url = "https://api.openai.com/v1/audio/transcriptions";
-            
+
             log.info("🎧 WAV bytes={} (~{} ms)",
                     wavAudio.length,
                     (wavAudio.length - 44) / 16); // approx ms @ 8kHz PCM
@@ -87,20 +94,18 @@ public class SttService {
             return node.path("text").asText("").trim();
 
         } catch (HttpClientErrorException.Unauthorized e) {
-            log.error("OpenAI API returned 401 Unauthorized. Check that openai.api-key in application.properties (or OPENAI_API_KEY env) is set and valid. Keys: https://platform.openai.com/api-keys");
-            return "";
+            throw new SttException("STT authentication failed — check OPENAI_API_KEY", e);
+        } catch (ResourceAccessException e) {
+            throw new SttException("STT service unreachable", e);
+        } catch (HttpServerErrorException e) {
+            throw new SttException("STT server error: " + e.getStatusCode(), e);
         } catch (Exception ex) {
-            log.error("Failed to transcribe audio", ex);
-            return "";
+            throw new SttException("STT transcription failed", ex);
         }
     }
 
-    /**
-     * Convert Twilio μ-law (8kHz) to PCM WAV for Whisper.
-     */
     private byte[] convertMulawToWav(byte[] mulaw) throws Exception {
 
-        // μ-law: 8kHz, mono, 8-bit, 1 byte per frame
         AudioFormat mulawFormat = new AudioFormat(
                 AudioFormat.Encoding.ULAW,
                 8000f,
@@ -111,7 +116,6 @@ public class SttService {
                 false
         );
 
-        // PCM: 16-bit signed
         AudioFormat pcmFormat = new AudioFormat(
                 AudioFormat.Encoding.PCM_SIGNED,
                 8000f,
@@ -122,8 +126,7 @@ public class SttService {
                 false
         );
 
-        // ✅ CORRECT frame length (NOT mulaw.length blindly)
-        long frameLength = mulaw.length; // 1 byte per frame for μ-law
+        long frameLength = mulaw.length;
 
         try (
                 ByteArrayInputStream bais = new ByteArrayInputStream(mulaw);
