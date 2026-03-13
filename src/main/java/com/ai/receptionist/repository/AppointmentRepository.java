@@ -37,4 +37,9 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
     List<Appointment> findConfirmedByPhoneAndTenantWithDetails(
             @Param("phone") String phone,
             @Param("tenantId") Long tenantId);
+
+    /** Find all appointments for a tenant (for bulk sync operations) */
+    @Query("SELECT a FROM Appointment a JOIN FETCH a.patient p JOIN FETCH a.doctor d JOIN FETCH a.slot s " +
+           "WHERE a.tenantId = :tenantId ORDER BY a.createdAt DESC")
+    List<Appointment> findByTenantId(@Param("tenantId") Long tenantId);
 }

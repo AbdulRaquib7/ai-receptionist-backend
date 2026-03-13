@@ -3,6 +3,7 @@ package com.ai.receptionist.service;
 import com.ai.receptionist.config.ConversationProperties;
 import com.ai.receptionist.entity.*;
 import com.ai.receptionist.repository.*;
+import com.ai.receptionist.service.hubspot.HubSpotSyncOrchestrator;
 import com.ai.receptionist.utils.LogSanitizer;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
@@ -27,6 +28,7 @@ public class AppointmentService {
     private final PatientRepository patientRepository;
     private final AppointmentRepository appointmentRepository;
     private final ConversationProperties conversationProps;
+    private final HubSpotSyncOrchestrator hubSpotSyncOrchestrator;
 
 
     /** Get all active doctors for a specific tenant */
@@ -255,6 +257,13 @@ public class AppointmentService {
                 tenantId
         );
 
+        // Sync appointment to HubSpot CRM (non-blocking)
+        try {
+            hubSpotSyncOrchestrator.syncNewAppointment(appointment);
+        } catch (Exception e) {
+            log.warn("Failed to sync appointment to HubSpot, but appointment booking succeeded", e);
+        }
+
         return Optional.of(appointment);
     }
 
@@ -278,6 +287,14 @@ public class AppointmentService {
         slotRepository.save(slot);
 
         log.info("Cancelled appointment for {} ({})", LogSanitizer.maskPhone(twilioPhone), LogSanitizer.maskName(appt.getPatient().getName()));
+
+        // Sync cancellation to HubSpot CRM (non-blocking)
+        try {
+            hubSpotSyncOrchestrator.syncAppointmentStatusChange(appt, "appointment_" + appt.getId());
+        } catch (Exception e) {
+            log.warn("Failed to sync cancellation to HubSpot, but appointment cancellation succeeded", e);
+        }
+
         return true;
     }
 

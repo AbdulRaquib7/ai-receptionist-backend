@@ -33,4 +33,18 @@ public class CallerPhoneResolver {
         }
         return fromNumber;
     }
+
+    /**
+     * Check if a phone number is a synthetic/fallback number (not a real caller)
+     * Used to skip syncing invalid numbers to external systems like HubSpot
+     */
+    public boolean isFallbackNumber(String phoneNumber) {
+        if (phoneNumber == null) return true;
+        
+        String fallback = StringUtils.isNotBlank(anonymousCallerFallback)
+                ? anonymousCallerFallback.trim()
+                : DEFAULT_ANONYMOUS_CALLER;
+        
+        return phoneNumber.equals(fallback) || phoneNumber.equals(DEFAULT_ANONYMOUS_CALLER);
+    }
 }

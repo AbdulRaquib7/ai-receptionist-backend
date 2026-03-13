@@ -38,7 +38,7 @@ class AppointmentServiceTest {
     void setUp() {
         MockitoAnnotations.openMocks(this);
         ConversationProperties props = new ConversationProperties();
-        service = new AppointmentService(doctorRepository, slotRepository, patientRepository, appointmentRepository, props);
+        service = new AppointmentService(doctorRepository, slotRepository, patientRepository, appointmentRepository, props, null);
     }
 
     @Test
