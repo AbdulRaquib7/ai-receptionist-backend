@@ -172,15 +172,54 @@ public class LlmFlowService {
 
         Map<String, Map<String, List<String>>> slots = appointmentService.getAvailableSlotsForNextWeek(tenantId);
         ctx.append("\nAVAILABLE SLOTS (dynamic; never invent):\n");
+        ctx.append("IMMEDIATE (Today & Tomorrow - offer first):\n");
+        
+        LocalDate todayDate = LocalDate.parse(today);
+        String tomorrow = todayDate.plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE);
+        
         slots.forEach((docKey, byDate) -> {
-            ctx.append(docKey).append(": ");
-            List<String> parts = new ArrayList<>();
+            List<String> immediateParts = new ArrayList<>();
+            List<String> laterParts = new ArrayList<>();
+            
             byDate.forEach((date, times) -> {
                 if (times != null && !times.isEmpty()) {
-                    parts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                    if (date.equals(today) || date.equals(tomorrow)) {
+                        String dayLabel = date.equals(today) ? "Today" : "Tomorrow";
+                        immediateParts.add(dayLabel + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                    } else if (LocalDate.parse(date).isBefore(todayDate.plusDays(7))) {
+                        try {
+                            String dayName = LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEE MMM d"));
+                            laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                        } catch (Exception e) {
+                            laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                        }
+                    }
                 }
             });
-            ctx.append(String.join("; ", parts)).append("\n");
+            
+            if (!immediateParts.isEmpty()) {
+                ctx.append("  ").append(docKey).append(": ").append(String.join(", ", immediateParts)).append("\n");
+            }
+        });
+        
+        ctx.append("\nOTHER WEEK DATES (if caller asks):\n");
+        slots.forEach((docKey, byDate) -> {
+            List<String> laterParts = new ArrayList<>();
+            byDate.forEach((date, times) -> {
+                if (times != null && !times.isEmpty()) {
+                    if (!date.equals(today) && !date.equals(tomorrow) && LocalDate.parse(date).isBefore(todayDate.plusDays(7))) {
+                        try {
+                            String dayName = LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEE MMM d"));
+                            laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                        } catch (Exception e) {
+                            laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                        }
+                    }
+                }
+            });
+            if (!laterParts.isEmpty()) {
+                ctx.append("  ").append(docKey).append(": ").append(String.join(", ", laterParts)).append("\n");
+            }
         });
 
         String resolvedPhone = callerPhoneResolver.resolve(fromNumber);

@@ -98,6 +98,34 @@ public class ConversationOrchestrator {
         // Resume: history hydrates from conversation_history when in-memory is empty (e.g. stream reconnect)
         List<ChatMessage> history = conversationStore.getHistory(callSid);
 
+        // --- Check for hangup request ---
+        if (isHangupRequest(trimmed)) {
+            Optional<PendingActionDto> pendingOpt = pendingActionService.getIfAwaitingConfirmation(callSid);
+            
+            if (pendingOpt.isPresent()) {
+                // During pending action: ask to confirm abort
+                String abortMsg = "Are you sure you want to cancel the " + 
+                        mapIntentToAction(pendingOpt.get().getIntent()) + 
+                        " process and end the call?";
+                log.info("Hangup during pending action for call {}", callSid);
+                conversationStore.appendAssistant(callSid, fromNumber, abortMsg);
+                twilioService.speakResponse(callSid, abortMsg, false, tenantId);
+                return;
+            } else {
+                // No pending: just hangup
+                String goodbye = "Thank you for calling. Goodbye!";
+                log.info("Hangup request for call {}, no pending action", callSid);
+                conversationStore.appendAssistant(callSid, fromNumber, goodbye);
+                twilioService.speakResponse(callSid, goodbye, true, tenantId);
+                callSessionService.completeCall(callSid);
+                generateCallSummaryAsync(callSid, tenantId);
+                if (endCallCallback != null) {
+                    endCallCallback.onEndCall(callSid);
+                }
+                return;
+            }
+        }
+
         // Atomic check-and-get: eliminates TOCTOU race between check and use
         Optional<PendingActionDto> pendingOpt = pendingActionService.getIfAwaitingConfirmation(callSid);
         if (pendingOpt.isPresent()) {
@@ -125,9 +153,25 @@ public class ConversationOrchestrator {
             }
         }
 
-        // Pending + user said no → clear and acknowledge
+        // Pending + user said no → check if abort confirmation (user said no to "Are you sure...")
         if (aiText == null && pendingOpt.isPresent() && yesNo == YesNoResult.NO) {
-            pendingActionService.clearPending(callSid);
+            if (!history.isEmpty() && "assistant".equals(history.get(history.size() - 1).getRole())) {
+                String lastMsg = history.get(history.size() - 1).getContent().toLowerCase();
+                if (lastMsg.contains("cancel") && lastMsg.contains("process") && lastMsg.contains("end call")) {
+                    // User said NO to abort - continue with pending action
+                    String cont = "Let's continue then. Should I go ahead and " + 
+                            mapIntentToAction(pendingOpt.get().getIntent()) + "?";
+                    aiText = cont;
+                    log.info("User declined to abort for call {}", callSid);
+                } else {
+                    pendingActionService.clearPending(callSid);
+                    aiText = "No problem. What would you like to do?";
+                }
+            } else {
+                pendingActionService.clearPending(callSid);
+                aiText = "No problem. What would you like to do?";
+            }
+        }
             aiText = "No problem. What would you like to do?";
         }
 
@@ -236,6 +280,22 @@ public class ConversationOrchestrator {
             case BOOK -> CallSession.Outcome.BOOKED;
             case CANCEL -> CallSession.Outcome.CANCELLED;
             case RESCHEDULE -> CallSession.Outcome.RESCHEDULED;
+        };
+    }
+
+    private boolean isHangupRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        String lower = text.toLowerCase().trim();
+        return lower.equals("hangup") || lower.equals("hang up") || lower.equals("bye") || 
+               lower.equals("goodbye") || lower.equals("end call") || lower.equals("exit") ||
+               lower.contains("hang up");
+    }
+
+    private String mapIntentToAction(PendingActionDto.Intent intent) {
+        return switch (intent) {
+            case BOOK -> "booking";
+            case CANCEL -> "cancellation";
+            case RESCHEDULE -> "rescheduling";
         };
     }
 }

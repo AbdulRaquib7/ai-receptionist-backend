@@ -1,0 +1,29 @@
+# Maven build
+target/
+*.class
+
+# IDE
+.idea/
+*.iml
+*.iws
+.classpath
+.project
+.settings/
+.factorypath
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+tts-logs/
+
+# Environment
+.env
+.env.local
