@@ -417,6 +417,15 @@ public class AppointmentService {
     }
 
     /**
+     * Find confirmed appointments for a given tenant & date that haven't been reminded yet.
+     */
+    @Transactional(readOnly = true)
+    public List<Appointment> getUnremindedAppointmentsForTenantAndDate(Long tenantId, LocalDate date) {
+        if (tenantId == null) return List.of();
+        return appointmentRepository.findUnremindedForTenantAndDate(tenantId, date);
+    }
+
+    /**
      * Mark an appointment as reminded so it won't be called again.
      */
     @Transactional

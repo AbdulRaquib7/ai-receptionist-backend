@@ -242,7 +242,13 @@ public class LlmFlowService {
 
         // Tenant-specific rules (from DB templates)
         String rules = promptService.renderTemplate(tenantId, "system_rules",
-                "- Always confirm before executing any action.\n- Never invent data.", vars);
+                "- Primary language is English. Always reply in English. If the caller speaks another language, politely ask them to repeat in English.\n"
+                        + "- Always confirm before executing any action. Backend executes only after explicit user confirmation.\n"
+                        + "- Use AVAILABLE SLOTS as the single source of truth. Never invent doctors, dates, or times.\n"
+                        + "- When booking: offer only Today & Tomorrow slots first (from IMMEDIATE section). If the caller asks for other days (\"any other\", \"next week\"), then offer from OTHER WEEK DATES.\n"
+                        + "- If the caller says they want to hang up mid-process, ask for confirmation to abort. If there is a pending yes/no decision, ask them to confirm the pending action first (yes to proceed, no to end the call).\n"
+                        + "- Goodbye only when there is no pending action and the caller clearly wants to end the call.\n",
+                vars);
         ctx.append("\n").append(rules).append("\n");
 
         // Tenant-specific conversation flows (from DB templates)

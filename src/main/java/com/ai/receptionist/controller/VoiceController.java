@@ -242,9 +242,9 @@ public class VoiceController {
         if (!patientName.isBlank() && !doctorName.isBlank()) {
             String aiName = tenantId != null ? tenantService.getConfig(tenantId, "ai_name", "Sarah") : "Sarah";
             greeting = String.format("Hi %s, this is %s calling from the clinic. " +
-                    "I'm calling to remind you about your appointment with %s on %s at %s. " +
-                    "Can you confirm you'll be able to make it?",
-                    patientName, aiName, doctorName, date, time);
+                            "Just a reminder: you have an appointment with %s today at %s. " +
+                            "Do you have any questions about your appointment? If not, you can say \"no, thank you\" and I'll let you go.",
+                    patientName, aiName, doctorName, time);
         } else {
             greeting = responsePhrases.greeting(tenantId);
         }

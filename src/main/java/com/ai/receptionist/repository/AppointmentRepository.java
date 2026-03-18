@@ -16,6 +16,11 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
            "WHERE s.slotDate = :date AND a.status = 'CONFIRMED' AND a.reminded = false")
     List<Appointment> findUnremindedForDate(@Param("date") LocalDate date);
 
+    /** Find confirmed appointments for a tenant & date that haven't been reminded yet */
+    @Query("SELECT a FROM Appointment a JOIN FETCH a.patient p JOIN FETCH a.doctor d JOIN FETCH a.slot s " +
+           "WHERE a.tenantId = :tenantId AND s.slotDate = :date AND a.status = 'CONFIRMED' AND a.reminded = false")
+    List<Appointment> findUnremindedForTenantAndDate(@Param("tenantId") Long tenantId, @Param("date") LocalDate date);
+
     Optional<Appointment> findFirstByPatient_TwilioPhoneAndStatusOrderByCreatedAtDesc(
             String twilioPhone, Appointment.Status status);
 

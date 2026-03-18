@@ -12,6 +12,8 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -32,6 +34,11 @@ public class ReminderSchedulerService {
     private final TenantService tenantService;
     private final TenantRepository tenantRepository;
 
+    /**
+     * Checks periodically and sends reminders at/after business-hours start.
+     * This is intentionally a fixed-delay poller so it works across multiple tenants
+     * with different business hours without hardcoding separate cron expressions.
+     */
     @Scheduled(fixedDelayString = "${reminder.check-interval-ms:300000}") // Every 5 minutes
     public void checkAndSendReminders() {
         try {
@@ -51,7 +58,8 @@ public class ReminderSchedulerService {
     }
 
     private void processRemindersForTenant(Long tenantId, LocalDate today) {
-        List<Appointment> todayAppointments = appointmentService.getUnremindedAppointmentsForDate(today);
+        // Reminder calls are on the day of appointment (today), but we skip bookings created today.
+        List<Appointment> todayAppointments = appointmentService.getUnremindedAppointmentsForTenantAndDate(tenantId, today);
 
         if (todayAppointments.isEmpty()) {
             log.debug("No unreminded appointments for tenant {} on {}", tenantId, today);
@@ -59,6 +67,8 @@ public class ReminderSchedulerService {
         }
 
         log.info("Found {} unreminded appointments for tenant {} on {}", todayAppointments.size(), tenantId, today);
+
+        ZonedDateTime startOfToday = today.atStartOfDay(ZoneId.systemDefault());
 
         for (Appointment appt : todayAppointments) {
             try {
@@ -70,6 +80,13 @@ public class ReminderSchedulerService {
 
                 if (appt.getSlot() == null || appt.getSlot().getSlotDate() == null) {
                     log.warn("Invalid slot for appointment {}", appt.getId());
+                    appointmentService.markReminded(appt.getId());
+                    continue;
+                }
+
+                // If the appointment was created today, don't call a reminder per requirement.
+                if (appt.getCreatedAt() != null && appt.getCreatedAt().isAfter(startOfToday.toInstant())) {
+                    log.info("Skipping reminder (booked today) | appointmentId={} tenant={}", appt.getId(), tenantId);
                     appointmentService.markReminded(appt.getId());
                     continue;
                 }

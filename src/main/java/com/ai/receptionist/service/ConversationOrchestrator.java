@@ -172,8 +172,6 @@ public class ConversationOrchestrator {
                 aiText = "No problem. What would you like to do?";
             }
         }
-            aiText = "No problem. What would you like to do?";
-        }
 
         // --- LLM ---
         if (aiText == null) {
