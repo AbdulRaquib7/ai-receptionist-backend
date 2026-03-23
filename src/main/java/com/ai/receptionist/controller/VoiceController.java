@@ -224,12 +224,19 @@ public class VoiceController {
 
     /**
      * Outbound call webhook — Twilio calls this URL when the outbound call connects.
-     * Generates TwiML to greet the callee and connect a media stream.
+     * For reminder calls: delivers reminder, asks if any queries. Does not proactively
+     * ask about reschedule/cancel. If user says no or goodbye → hang up. If user asks
+     * reschedule or cancel → handle for that specific appointment.
      */
     @PostMapping(value = "/twilio/voice/outbound-start", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> outboundStart(@RequestParam Map<String, String> params) {
         String tenantIdParam = params.getOrDefault("tenantId", "");
+        String appointmentId = params.getOrDefault("appointmentId", "");
         String patientName = params.getOrDefault("patientName", "");
+        String patientLookupPhone = params.getOrDefault("patientLookupPhone",
+                params.getOrDefault("patientPhone", ""));
+        // Alias used by older logic/variable names in this controller.
+        String patientPhone = patientLookupPhone;
         String doctorName = params.getOrDefault("doctorName", "");
         String date = params.getOrDefault("date", "");
         String time = params.getOrDefault("time", "");
@@ -237,14 +244,19 @@ public class VoiceController {
         Long tenantId = null;
         try { tenantId = Long.parseLong(tenantIdParam); } catch (NumberFormatException ignored) {}
 
-        // Build outbound greeting with appointment context
+        // Build reminder greeting: tell reminder, ask if any queries, no proactive reschedule/cancel
         String greeting;
         if (!patientName.isBlank() && !doctorName.isBlank()) {
             String aiName = tenantId != null ? tenantService.getConfig(tenantId, "ai_name", "Sarah") : "Sarah";
-            greeting = String.format("Hi %s, this is %s calling from the clinic. " +
-                            "Just a reminder: you have an appointment with %s today at %s. " +
-                            "Do you have any questions about your appointment? If not, you can say \"no, thank you\" and I'll let you go.",
-                    patientName, aiName, doctorName, time);
+            String datePhrase = !date.isBlank() && !time.isBlank() ? " on " + date + " at " + time
+                    : !time.isBlank() ? " today at " + time : "";
+            greeting = String.format(
+            	    "Good day %s, this is %s calling from the clinic. " +
+            	    "I’m calling to remind you of your upcoming appointment with %s%s. " +
+            	    "If you have any questions or need assistance, please let me know. " +
+            	    "Otherwise, you can say 'no, thank you' and I will conclude the call.",
+            	    patientName, aiName, doctorName, datePhrase
+            	);
         } else {
             greeting = responsePhrases.greeting(tenantId);
         }
@@ -252,12 +264,21 @@ public class VoiceController {
         String playOrSayTwiml = buildPlaybackTwiml(greeting);
         StringBuilder streamParams = new StringBuilder();
         if (tenantId != null) {
-            streamParams.append("<Parameter name=\"TenantId\" value=\"").append(tenantId).append("\"/>");
+            streamParams.append("<Parameter name=\"TenantId\" value=\"").append(escapeXml(tenantId.toString())).append("\"/>");
+        }
+        if (!patientLookupPhone.isBlank()) {
+            streamParams.append("<Parameter name=\"From\" value=\"").append(escapeXml(patientLookupPhone)).append("\"/>");
+        }
+        if (!appointmentId.isBlank()) {
+            streamParams.append("<Parameter name=\"AppointmentId\" value=\"").append(escapeXml(appointmentId)).append("\"/>");
+        }
+        if (!patientPhone.isBlank()) {
+            streamParams.append("<Parameter name=\"CalleePhone\" value=\"").append(escapeXml(patientPhone)).append("\"/>");
         }
 
         String connectTwiml = "<Connect><Stream url=\"" + escapeXml(mediaStreamUrl) + "\">" + streamParams + "</Stream></Connect>";
         String twiml = "<Response>" + playOrSayTwiml + connectTwiml + "</Response>";
-        log.info("Outbound call connected -> stream to {} | tenant={}", mediaStreamUrl, tenantIdParam);
+        log.info("Outbound call connected -> stream | tenant={} appointmentId={}", tenantIdParam, appointmentId);
         return ResponseEntity.ok(twiml);
     }
 

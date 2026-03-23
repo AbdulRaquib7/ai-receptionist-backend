@@ -382,30 +382,65 @@ public class AppointmentService {
     private static String normalizeTime(String time) {
         if (time == null) return null;
 
-        String t = time.trim().replace('.', ':');
+        String t = time.trim();
+
+        // Normalize "p.m." / "a.m." before we touch dots used as time separators.
+        // Otherwise replacing '.' globally would corrupt "p.m." into "p:m".
+        t = t.replaceAll("(?i)\\bA\\.?M\\.?\\b", "AM");
+        t = t.replaceAll("(?i)\\bP\\.?M\\.?\\b", "PM");
+
+        // Only convert dots between digits (e.g. "4.30" -> "4:30"), not every dot in the string.
+        t = t.replaceAll("(?<=\\d)\\.(?=\\d{2}\\b)", ":");
+
+        // Also accept forms like "4.0 PM" -> "4:00 PM"
+        t = t.replaceAll("(?<=\\d)\\.(?=\\d\\b)", ":0");
+
+        // Common STT mis-hearings: "4 oo" -> "4:00"
+        t = t.replaceAll("(?i)\\b(\\d{1,2})\\s*oo\\b", "$1:00");
 
         if (t.contains(" to ")) {
             t = t.substring(0, t.indexOf(" to ")).trim();
         }
+        
+        java.util.regex.Pattern ampmPattern =
+                java.util.regex.Pattern.compile("(?i)^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)$");
+        java.util.regex.Matcher ampmMatcher = ampmPattern.matcher(t);
+        if (ampmMatcher.matches()) {
+            int hour = Integer.parseInt(ampmMatcher.group(1));
+            String minuteStr = ampmMatcher.group(2);
+            int minute = minuteStr != null ? Integer.parseInt(minuteStr) : 0;
+            String ampm = ampmMatcher.group(3).toUpperCase();
 
-        if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) {
-            int colon = t.indexOf(':');
-            int space = t.indexOf(' ', colon);
-            int h = Integer.parseInt(t.substring(0, colon));
-            String rest = space > 0 ? t.substring(colon, space).trim() + " " + t.substring(space).trim() : t.substring(colon);
-            return String.format("%02d%s", h, rest);
+            // Convert "0 AM" -> "12:00 AM"
+            if (hour == 0) hour = 12;
+
+            return String.format("%02d:%02d %s", hour, minute, ampm);
         }
 
-        if (t.matches("\\d{1,2}:\\d{2}")) {
-            int h = Integer.parseInt(t.split(":")[0]);
-            String m = t.split(":")[1];
-            if (h >= 12) {
-                return String.format("%02d:%s PM", h == 12 ? 12 : h - 12, m);
+        java.util.regex.Pattern hhmm24Pattern =
+                java.util.regex.Pattern.compile("^(\\d{1,2}):(\\d{2})$");
+        java.util.regex.Matcher hhmm24Matcher = hhmm24Pattern.matcher(t);
+        if (hhmm24Matcher.matches()) {
+            int hour = Integer.parseInt(hhmm24Matcher.group(1));
+            String minute = hhmm24Matcher.group(2);
+
+            if (hour >= 12) {
+                return String.format("%02d:%s PM", hour == 12 ? 12 : hour - 12, minute);
             }
-            return String.format("%02d:%s AM", h == 0 ? 12 : h, m);
+            return String.format("%02d:%s AM", hour == 0 ? 12 : hour, minute);
         }
 
-        return t;
+        java.util.regex.Pattern hOnly24Pattern =
+                java.util.regex.Pattern.compile("^(\\d{1,2})$");
+        java.util.regex.Matcher hOnly24Matcher = hOnly24Pattern.matcher(t);
+        if (hOnly24Matcher.matches()) {
+            int hour = Integer.parseInt(hOnly24Matcher.group(1));
+            return hour >= 12
+                    ? String.format("%02d:00 PM", hour == 12 ? 12 : hour - 12)
+                    : String.format("%02d:00 AM", hour == 0 ? 12 : hour);
+        }
+
+        return t; 
     }
 
     /**

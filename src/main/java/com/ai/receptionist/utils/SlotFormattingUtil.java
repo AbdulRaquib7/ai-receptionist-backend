@@ -44,6 +44,18 @@ public final class SlotFormattingUtil {
         return sb.toString();
     }
 
+    /**
+     * Converts a list of time strings (e.g. ["06:00 PM", "06:30 PM"])
+     * into a stable comma-separated list: "06:00 PM, 06:30 PM".
+     *
+     * This is intentionally NOT compressed into ranges because LLMs often pick
+     * the first time in the range (e.g. "2:00 PM to 2:30 PM" → 2:00 PM).
+     */
+    public static String formatSlotsAsList(List<String> times) {
+        if (times == null || times.isEmpty()) return "";
+        return String.join(", ", times);
+    }
+
     static Integer parseTimeToMinutes(String t) {
         if (t == null || t.isBlank()) return null;
         t = t.trim();

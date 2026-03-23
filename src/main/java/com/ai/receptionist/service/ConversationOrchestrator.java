@@ -41,6 +41,8 @@ public class ConversationOrchestrator {
     private final TwilioService twilioService;
     private final TenantService tenantService;
     private final CallSessionService callSessionService;
+    private final ReminderCallContextService reminderCallContextService;
+    private final AppointmentService appointmentService;
 
     /**
      * Callback to allow the caller (MediaStreamHandler) to clean up state
@@ -117,6 +119,7 @@ public class ConversationOrchestrator {
                 log.info("Hangup request for call {}, no pending action", callSid);
                 conversationStore.appendAssistant(callSid, fromNumber, goodbye);
                 twilioService.speakResponse(callSid, goodbye, true, tenantId);
+                markReminderCallCompleted(callSid);
                 callSessionService.completeCall(callSid);
                 generateCallSummaryAsync(callSid, tenantId);
                 if (endCallCallback != null) {
@@ -226,12 +229,23 @@ public class ConversationOrchestrator {
         twilioService.speakResponse(callSid, aiText, endCall, tenantId);
         if (endCall) {
             pendingActionService.clearPending(callSid);
+            markReminderCallCompleted(callSid);
             callSessionService.completeCall(callSid);
             generateCallSummaryAsync(callSid, tenantId);
             if (endCallCallback != null) {
                 endCallCallback.onEndCall(callSid);
             }
         }
+    }
+
+    /**
+     * If this was a reminder call, mark the appointment as reminded and clear context.
+     */
+    private void markReminderCallCompleted(String callSid) {
+        reminderCallContextService.getAndClear(callSid).ifPresent(appointmentId -> {
+            appointmentService.markReminded(appointmentId);
+            log.info("Reminder call completed, marked appointment {} as reminded", appointmentId);
+        });
     }
 
     /**

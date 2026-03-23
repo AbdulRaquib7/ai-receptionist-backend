@@ -25,6 +25,7 @@ public class ConfirmationExecutionService {
 
     private final AppointmentService appointmentService;
     private final CallerPhoneResolver callerPhoneResolver;
+    private final PhoneNumberNormalizationService phoneNumberNormalizationService;
 
     /**
      * Executes the pending action (BOOK, CANCEL, RESCHEDULE) and returns a
@@ -64,11 +65,24 @@ public class ConfirmationExecutionService {
             log.warn("Book action missing required fields");
             return Optional.of("I don't have the full booking details. Let's try again.");
         }
+
+        String rawPatientPhone = p.getPatientPhone();
+        String normalizedPatientPhone = rawPatientPhone;
+        if (StringUtils.isNotBlank(rawPatientPhone) && !rawPatientPhone.trim().startsWith("+")) {
+            // If user provided a number without country code, try inferring it from the caller.
+            normalizedPatientPhone = phoneNumberNormalizationService
+                    .normalizeToE164(rawPatientPhone, callerPhone)
+                    .orElse(null);
+            if (normalizedPatientPhone == null) {
+                return Optional.of("Please tell me your full phone number including country code (example: +1..., +44...). Once I have that, I can book the appointment.");
+            }
+        }
+
         Optional<Appointment> result = appointmentService.bookAppointment(
                 tenantId,
                 callerPhone,
                 p.getPatientName(),
-                p.getPatientPhone(),
+                normalizedPatientPhone,
                 p.getDoctorKey(),
                 p.getDate(),
                 p.getTime()

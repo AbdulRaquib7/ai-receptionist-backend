@@ -3,6 +3,7 @@
   // You can still build/run manually via Maven/Run configurations.
     "java.autobuild.enabled": true,
     "java.configuration.updateBuildConfiguration": "automatic",
-    "java.import.maven.enabled": true
+    "java.import.maven.enabled": true,
+    "java.compile.nullAnalysis.mode": "automatic"
   }
 

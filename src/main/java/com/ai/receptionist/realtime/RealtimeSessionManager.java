@@ -93,7 +93,7 @@ public class RealtimeSessionManager implements RealtimeEventHandler {
             }
 
             // Send session configuration (system prompt, tools, VAD)
-            Map<String, Object> config = sessionConfig.buildSessionConfig(tenantId, fromNumber);
+            Map<String, Object> config = sessionConfig.buildSessionConfig(tenantId, fromNumber, callSid);
             realtimeClient.sendSessionUpdate(config);
 
             // Mark call as in-progress and tag pipeline

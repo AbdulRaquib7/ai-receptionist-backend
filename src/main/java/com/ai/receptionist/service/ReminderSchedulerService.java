@@ -2,6 +2,7 @@ package com.ai.receptionist.service;
 
 import com.ai.receptionist.entity.Appointment;
 import com.ai.receptionist.entity.Tenant;
+import com.ai.receptionist.repository.AppointmentRepository;
 import com.ai.receptionist.repository.TenantRepository;
 import com.ai.receptionist.utils.LogSanitizer;
 import lombok.RequiredArgsConstructor;
@@ -9,19 +10,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDate;
-import java.time.LocalTime;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * Scheduled service that sends appointment reminder calls on the day of appointment.
- * Respects business hours from tenant_config. Same-day reminders only.
+ * Scheduled service that sends appointment reminder calls exactly 1 hour before each appointment.
+ * Runs every minute, finds CONFIRMED appointments with reminded=false whose appointment time
+ * falls in the next 1-hour window. Respects business hours.
+ * Reminded is set immediately after successfully initiating the outbound call to avoid duplicates.
  */
 @Service
 @RequiredArgsConstructor
@@ -29,99 +28,96 @@ public class ReminderSchedulerService {
 
     private static final Logger log = LoggerFactory.getLogger(ReminderSchedulerService.class);
 
-    private final AppointmentService appointmentService;
+    private final AppointmentRepository appointmentRepository;
     private final OutboundCallService outboundCallService;
     private final TenantService tenantService;
     private final TenantRepository tenantRepository;
 
     /**
-     * Checks periodically and sends reminders at/after business-hours start.
-     * This is intentionally a fixed-delay poller so it works across multiple tenants
-     * with different business hours without hardcoding separate cron expressions.
+     * Runs every minute. Fetches appointments due for reminder (next 1 hour window),
+     * initiates outbound calls. Marked reminded immediately after call initiation.
      */
-    @Scheduled(fixedDelayString = "${reminder.check-interval-ms:300000}") // Every 5 minutes
+    @Scheduled(cron = "0 * * * * *")
+    @Transactional
     public void checkAndSendReminders() {
         try {
-            LocalDate today = LocalDate.now();
             List<Tenant> activeTenants = tenantRepository.findByActiveTrue();
-            
             for (Tenant tenant : activeTenants) {
                 if (!isWithinBusinessHours(tenant.getId())) {
                     log.debug("Tenant {} outside business hours, skipping reminders", tenant.getId());
                     continue;
                 }
-                processRemindersForTenant(tenant.getId(), today);
+                processReminders();
             }
         } catch (Exception e) {
             log.error("Reminder scheduler error", e);
         }
     }
 
-    private void processRemindersForTenant(Long tenantId, LocalDate today) {
-        // Reminder calls are on the day of appointment (today), but we skip bookings created today.
-        List<Appointment> todayAppointments = appointmentService.getUnremindedAppointmentsForTenantAndDate(tenantId, today);
+    private void processReminders() {
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime nextHour = now.plusHours(1);
+        log.info("Checking reminders between {} and {}", now, nextHour);
 
-        if (todayAppointments.isEmpty()) {
-            log.debug("No unreminded appointments for tenant {} on {}", tenantId, today);
+        List<Appointment> appointments = appointmentRepository.findAppointmentsToRemind(now, nextHour);
+
+        if (appointments.isEmpty()) {
+            log.debug("No appointments to remind in window {} - {}", now, nextHour);
             return;
         }
 
-        log.info("Found {} unreminded appointments for tenant {} on {}", todayAppointments.size(), tenantId, today);
+        log.info("Found {} appointment(s) to remind in window {} - {}", appointments.size(), now, nextHour);
 
-        ZonedDateTime startOfToday = today.atStartOfDay(ZoneId.systemDefault());
-
-        for (Appointment appt : todayAppointments) {
+        for (Appointment appt : appointments) {
             try {
-                if (!appt.getStatus().equals(Appointment.Status.CONFIRMED)) {
-                    log.debug("Skipping appointment {} - not confirmed", appt.getId());
-                    appointmentService.markReminded(appt.getId());
-                    continue;
-                }
-
-                if (appt.getSlot() == null || appt.getSlot().getSlotDate() == null) {
-                    log.warn("Invalid slot for appointment {}", appt.getId());
-                    appointmentService.markReminded(appt.getId());
-                    continue;
-                }
-
-                // If the appointment was created today, don't call a reminder per requirement.
-                if (appt.getCreatedAt() != null && appt.getCreatedAt().isAfter(startOfToday.toInstant())) {
-                    log.info("Skipping reminder (booked today) | appointmentId={} tenant={}", appt.getId(), tenantId);
-                    appointmentService.markReminded(appt.getId());
-                    continue;
-                }
-
-                String patientPhone = appt.getPatient().getTwilioPhone();
-                if (patientPhone == null || patientPhone.isBlank()) {
-                    patientPhone = appt.getPatient().getPhone();
-                }
-                if (patientPhone == null || patientPhone.isBlank()) {
-                    log.warn("No phone for patient in appointment {}", appt.getId());
-                    appointmentService.markReminded(appt.getId());
-                    continue;
-                }
-
-                String callSid = outboundCallService.initiateCall(
-                        appt.getTenantId(),
-                        patientPhone,
-                        Map.of(
-                                "appointmentId", appt.getId().toString(),
-                                "doctorName", appt.getDoctor().getName(),
-                                "date", appt.getSlot().getSlotDate().toString(),
-                                "time", appt.getSlot().getStartTime(),
-                                "patientName", appt.getPatient().getName()
-                        )
-                );
-
-                if (callSid != null && !callSid.isBlank()) {
-                    appointmentService.markReminded(appt.getId());
-                    log.info("Reminder call initiated | appointmentId={} patient={} doctor={} phone={}",
-                            appt.getId(), LogSanitizer.maskName(appt.getPatient().getName()),
-                            appt.getDoctor().getName(), LogSanitizer.maskPhone(patientPhone));
-                }
+                sendReminder(appt);
             } catch (Exception e) {
-                log.error("Failed to send reminder for appointment {}", appt.getId(), e);
+                log.error("Failed to initiate reminder for appointment {}: {}", appt.getId(), e.getMessage(), e);
             }
+        }
+    }
+
+    private void sendReminder(Appointment appt) {
+        if (appt.getStatus() != Appointment.Status.CONFIRMED) return;
+        if (appt.isReminded()) return;
+
+        // Dial the patient's actual phone number.
+        String dialPhone = appt.getPatient() != null ? appt.getPatient().getPhone() : null;
+        if (dialPhone == null || dialPhone.isBlank()) {
+            // Fallback: if phone is missing, dial twilioPhone.
+            dialPhone = appt.getPatient() != null ? appt.getPatient().getTwilioPhone() : null;
+        }
+        if (dialPhone == null || dialPhone.isBlank()) {
+            log.warn("No phone for patient in appointment {}, skipping", appt.getId());
+            return;
+        }
+
+        // For DB matching during cancel/reschedule tools, we must keep using twilioPhone.
+        String lookupPhone = appt.getPatient() != null ? appt.getPatient().getTwilioPhone() : null;
+        if (lookupPhone == null || lookupPhone.isBlank()) {
+            // Fallback: if twilioPhone is missing, use the dial number.
+            lookupPhone = dialPhone;
+        }
+
+        Map<String, String> context = Map.of(
+                "appointmentId", appt.getId().toString(),
+                "patientName", appt.getPatient() != null ? appt.getPatient().getName() : "Patient",
+                "doctorName", appt.getDoctor() != null ? appt.getDoctor().getName() : "Doctor",
+                "date", appt.getSlot() != null ? appt.getSlot().getSlotDate().toString() : "",
+                "time", appt.getSlot() != null ? appt.getSlot().getStartTime() : "",
+                "patientLookupPhone", lookupPhone
+        );
+
+        String callSid = outboundCallService.initiateCall(appt.getTenantId(), dialPhone, context);
+
+        if (callSid != null && !callSid.isBlank()) {
+            // Mark immediately to avoid duplicate reminder calls while the user is still on the phone.
+            appt.setReminded(true);
+            appointmentRepository.save(appt);
+
+            log.info("Reminder call initiated | appointmentId={} patient={} doctor={} phone={}",
+                    appt.getId(), LogSanitizer.maskName(appt.getPatient().getName()),
+                    appt.getDoctor().getName(), LogSanitizer.maskPhone(dialPhone));
         }
     }
 
@@ -129,49 +125,47 @@ public class ReminderSchedulerService {
         try {
             String hoursConfig = tenantService.getConfig(tenantId, "business_hours", "9:00 AM - 5:00 PM");
             BusinessHours hours = parseBusinessHours(hoursConfig);
-            LocalTime now = LocalTime.now();
+            java.time.LocalTime now = java.time.LocalTime.now();
             return !now.isBefore(hours.start) && now.isBefore(hours.end);
         } catch (Exception e) {
             log.warn("Error parsing business hours for tenant {}", tenantId, e);
-            LocalTime now = LocalTime.now();
-            return !now.isBefore(LocalTime.of(9, 0)) && now.isBefore(LocalTime.of(17, 0));
+            java.time.LocalTime now = java.time.LocalTime.now();
+            return !now.isBefore(java.time.LocalTime.of(9, 0)) && now.isBefore(java.time.LocalTime.of(17, 0));
         }
     }
 
     private BusinessHours parseBusinessHours(String config) {
         if (config == null || config.isBlank()) {
-            return new BusinessHours(LocalTime.of(9, 0), LocalTime.of(17, 0));
+            return new BusinessHours(java.time.LocalTime.of(9, 0), java.time.LocalTime.of(17, 0));
         }
-
-        Pattern p = Pattern.compile(
-            "([0-9]{1,2}):([0-9]{2})\\s*(AM|PM)?\\s*-\\s*([0-9]{1,2}):([0-9]{2})\\s*(AM|PM)?",
-            Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(config);
-
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                "([0-9]{1,2}):([0-9]{2})\\s*(AM|PM)?\\s*-\\s*([0-9]{1,2}):([0-9]{2})\\s*(AM|PM)?",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher m = p.matcher(config);
         if (!m.find()) {
-            return new BusinessHours(LocalTime.of(9, 0), LocalTime.of(17, 0));
+            return new BusinessHours(java.time.LocalTime.of(9, 0), java.time.LocalTime.of(17, 0));
         }
-
         int startHr = Integer.parseInt(m.group(1));
         int startMin = Integer.parseInt(m.group(2));
         String startAmPm = m.group(3);
         int endHr = Integer.parseInt(m.group(4));
         int endMin = Integer.parseInt(m.group(5));
         String endAmPm = m.group(6);
-
         if (startAmPm != null) startHr = convert12to24(startHr, startAmPm);
         if (endAmPm != null) endHr = convert12to24(endHr, endAmPm);
-
-        return new BusinessHours(LocalTime.of(startHr, startMin), LocalTime.of(endHr, endMin));
+        return new BusinessHours(java.time.LocalTime.of(startHr, startMin), java.time.LocalTime.of(endHr, endMin));
     }
 
     private int convert12to24(int hr, String amPm) {
-        if (amPm.equalsIgnoreCase("PM")) return hr == 12 ? 12 : hr + 12;
-        else return hr == 12 ? 0 : hr;
+        return amPm.equalsIgnoreCase("PM") ? (hr == 12 ? 12 : hr + 12) : (hr == 12 ? 0 : hr);
     }
 
     private static class BusinessHours {
-        LocalTime start, end;
-        BusinessHours(LocalTime start, LocalTime end) { this.start = start; this.end = end; }
+        final java.time.LocalTime start;
+        final java.time.LocalTime end;
+        BusinessHours(java.time.LocalTime start, java.time.LocalTime end) {
+            this.start = start;
+            this.end = end;
+        }
     }
 }

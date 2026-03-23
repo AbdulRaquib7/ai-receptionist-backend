@@ -9,6 +9,7 @@ import com.ai.receptionist.realtime.RealtimeSessionManager;
 import com.ai.receptionist.service.AppointmentService;
 import com.ai.receptionist.service.CallSessionService;
 import com.ai.receptionist.service.ConversationOrchestrator;
+import com.ai.receptionist.service.ReminderCallContextService;
 import com.ai.receptionist.service.TenantService;
 import com.ai.receptionist.utils.LogSanitizer;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -48,6 +49,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
     private final RealtimeApiProperties realtimeProps;
     private final RealtimeSessionConfig realtimeSessionConfig;
     private final AppointmentService appointmentService;
+    private final ReminderCallContextService reminderCallContextService;
     private final ScheduledExecutorService realtimeScheduler;
 
     @Value("${openai.api-key}")
@@ -75,7 +77,8 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                               TenantService tenantService,
                               RealtimeApiProperties realtimeProps,
                               RealtimeSessionConfig realtimeSessionConfig,
-                              AppointmentService appointmentService) {
+                              AppointmentService appointmentService,
+                              ReminderCallContextService reminderCallContextService) {
         this.orchestrator = orchestrator;
         this.mapper = objectMapper;
         this.conversationProps = conversationProps;
@@ -85,6 +88,7 @@ public class MediaStreamHandler extends TextWebSocketHandler {
         this.realtimeProps = realtimeProps;
         this.realtimeSessionConfig = realtimeSessionConfig;
         this.appointmentService = appointmentService;
+        this.reminderCallContextService = reminderCallContextService;
         this.realtimeScheduler = Executors.newScheduledThreadPool(2,
                 r -> { Thread t = new Thread(r, "realtime-scheduler"); t.setDaemon(true); return t; });
     }
@@ -133,6 +137,19 @@ public class MediaStreamHandler extends TextWebSocketHandler {
             String tenantIdParam = customParams.path("TenantId").asText("");
             if (!tenantIdParam.isBlank()) {
                 try { state.tenantId = Long.parseLong(tenantIdParam); } catch (NumberFormatException ignored) {}
+            }
+            // Outbound reminder: CalleePhone = patient we called, AppointmentId for marking reminded
+            String calleePhone = customParams.path("CalleePhone").asText("");
+            if (!calleePhone.isBlank()) {
+                state.fromNumber = calleePhone;
+                callFromNumbers.put(state.callSid, calleePhone);
+            }
+            String appointmentIdParam = customParams.path("AppointmentId").asText("");
+            if (!appointmentIdParam.isBlank()) {
+                try {
+                    Long appointmentId = Long.parseLong(appointmentIdParam);
+                    reminderCallContextService.setReminderContext(state.callSid, appointmentId);
+                } catch (NumberFormatException ignored) {}
             }
             // Resolve per-tenant silence tuning overrides (if configured in tenant_config table)
             if (state.tenantId != null && tenantService != null) {
@@ -202,6 +219,9 @@ public class MediaStreamHandler extends TextWebSocketHandler {
                         .anyMatch(s -> stopped.callSid.equals(s.callSid));
                 if (!hasOtherStreams) {
                     callFromNumbers.invalidate(stopped.callSid);
+                    // Mark reminder call completed if this was an outbound reminder (user hung up)
+                    reminderCallContextService.getAndClear(stopped.callSid)
+                            .ifPresent(appointmentId -> appointmentService.markReminded(appointmentId));
                     // Complete the call session if not already completed (e.g. user hung up)
                     callSessionService.completeCall(stopped.callSid);
                 }

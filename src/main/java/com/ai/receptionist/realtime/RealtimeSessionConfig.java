@@ -5,6 +5,7 @@ import com.ai.receptionist.config.RealtimeApiProperties;
 import com.ai.receptionist.entity.Doctor;
 import com.ai.receptionist.service.AppointmentService;
 import com.ai.receptionist.service.PromptService;
+import com.ai.receptionist.service.ReminderCallContextService;
 import com.ai.receptionist.service.TenantService;
 import com.ai.receptionist.utils.SlotFormattingUtil;
 import lombok.RequiredArgsConstructor;
@@ -29,15 +30,17 @@ public class RealtimeSessionConfig {
     private final TenantService tenantService;
     private final CallerPhoneResolver callerPhoneResolver;
     private final RealtimeApiProperties realtimeProps;
+    private final ReminderCallContextService reminderCallContextService;
 
     /**
      * Build the full session configuration map to send via session.update.
      *
      * @param tenantId    tenant for context
-     * @param fromNumber  caller's phone number
+     * @param fromNumber  caller's phone number (for inbound) or callee/patient phone (for outbound reminder)
+     * @param callSid     Twilio call SID (to detect reminder calls)
      * @return map suitable for RealtimeApiClient.sendSessionUpdate()
      */
-    public Map<String, Object> buildSessionConfig(Long tenantId, String fromNumber) {
+    public Map<String, Object> buildSessionConfig(Long tenantId, String fromNumber, String callSid) {
         Map<String, Object> session = new LinkedHashMap<>();
 
         // Voice
@@ -45,7 +48,8 @@ public class RealtimeSessionConfig {
         session.put("voice", voice);
 
         // Instructions (system prompt)
-        session.put("instructions", buildSystemInstructions(tenantId, fromNumber));
+        boolean isReminderCall = callSid != null && reminderCallContextService.isReminderCall(callSid);
+        session.put("instructions", buildSystemInstructions(tenantId, fromNumber, isReminderCall));
 
         // Input audio format: PCM16 24kHz (we convert from mu-law before sending)
         session.put("input_audio_format", "pcm16");
@@ -77,12 +81,18 @@ public class RealtimeSessionConfig {
     /**
      * Build system instructions, mirroring LlmFlowService.buildContext().
      */
-    private String buildSystemInstructions(Long tenantId, String fromNumber) {
+    private String buildSystemInstructions(Long tenantId, String fromNumber, boolean isReminderCall) {
         String today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
 
         Map<String, String> vars = buildTemplateVariables(tenantId);
 
         StringBuilder ctx = new StringBuilder();
+        if (isReminderCall) {
+            ctx.append("REMINDER CALL MODE: This is an outbound reminder call. You already delivered the reminder. ")
+                    .append("Do NOT proactively ask if they want to reschedule or cancel. ")
+                    .append("If the user has no questions or says no thank you, say a brief goodbye and end the call. ")
+                    .append("If the user explicitly asks to reschedule or cancel, help them with that for this specific appointment.\n\n");
+        }
         ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n\n");
 
         // Persona
@@ -110,7 +120,7 @@ public class RealtimeSessionConfig {
             List<String> parts = new ArrayList<>();
             byDate.forEach((date, times) -> {
                 if (times != null && !times.isEmpty()) {
-                    parts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                    parts.add(date + " " + SlotFormattingUtil.formatSlotsAsList(times));
                 }
             });
             ctx.append(String.join("; ", parts)).append("\n");

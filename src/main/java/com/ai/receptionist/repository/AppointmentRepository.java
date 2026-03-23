@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -42,4 +43,20 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
     List<Appointment> findConfirmedByPhoneAndTenantWithDetails(
             @Param("phone") String phone,
             @Param("tenantId") Long tenantId);
+
+    /**
+     * Find appointments that need a reminder call: appointment time is between now and next hour,
+     * reminded = false, and status = CONFIRMED.
+     * Uses native SQL to combine slot_date + start_time for the time window filter.
+     */
+    @Query(value = """
+            SELECT a.* FROM appointment a
+            JOIN appointment_slot s ON a.slot_id = s.id
+            WHERE a.reminded = false
+              AND a.status = 'CONFIRMED'
+              AND (s.slot_date + (TO_TIMESTAMP(s.start_time, 'HH12:MI AM')::time))::timestamp >= ?1
+              AND (s.slot_date + (TO_TIMESTAMP(s.start_time, 'HH12:MI AM')::time))::timestamp <= ?2
+            ORDER BY s.slot_date, s.start_time
+            """, nativeQuery = true)
+    List<Appointment> findAppointmentsToRemind(LocalDateTime now, LocalDateTime nextHour);
 }

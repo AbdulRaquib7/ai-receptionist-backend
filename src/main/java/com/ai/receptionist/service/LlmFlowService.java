@@ -45,6 +45,7 @@ public class LlmFlowService {
     private final ConversationProperties conversationProps;
     private final PromptService promptService;
     private final TenantService tenantService;
+    private final ReminderCallContextService reminderCallContextService;
 
     public LlmFlowService(@Qualifier("restTemplate") RestTemplate restTemplate,
                            ObjectMapper objectMapper,
@@ -52,7 +53,8 @@ public class LlmFlowService {
                            CallerPhoneResolver callerPhoneResolver,
                            ConversationProperties conversationProps,
                            PromptService promptService,
-                           TenantService tenantService) {
+                           TenantService tenantService,
+                           ReminderCallContextService reminderCallContextService) {
         this.restTemplate = restTemplate;
         this.mapper = objectMapper;
         this.appointmentService = appointmentService;
@@ -60,6 +62,7 @@ public class LlmFlowService {
         this.conversationProps = conversationProps;
         this.promptService = promptService;
         this.tenantService = tenantService;
+        this.reminderCallContextService = reminderCallContextService;
     }
 
     @Value("${openai.api-key}")
@@ -97,7 +100,8 @@ public class LlmFlowService {
             throw new LlmException("OPENAI_API_KEY is not set", null);
         }
 
-        String context = buildContext(fromNumber, tenantId);
+        boolean isReminderCall = reminderCallContextService.isReminderCall(callSid);
+        String context = buildContext(fromNumber, tenantId, isReminderCall);
         String outputFormat = buildOutputFormatInstructions();
 
         List<Map<String, String>> messages = new ArrayList<>();
@@ -143,13 +147,21 @@ public class LlmFlowService {
         }
     }
 
-    private String buildContext(String fromNumber, Long tenantId) {
+    private String buildContext(String fromNumber, Long tenantId, boolean isReminderCall) {
         String today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
 
         // Build template variables for {{placeholder}} substitution
         Map<String, String> vars = buildTemplateVariables(tenantId);
 
         StringBuilder ctx = new StringBuilder();
+
+        if (isReminderCall) {
+            ctx.append("REMINDER CALL MODE: This is an outbound reminder call. You already delivered the reminder. ")
+                    .append("Do NOT proactively ask if they want to reschedule or cancel. ")
+                    .append("If the user has no questions or says no thank you, say a brief goodbye and end the call. ")
+                    .append("If the user explicitly asks to reschedule or cancel, help them with that for this specific appointment.\n\n");
+        }
+
         ctx.append("TODAY'S DATE: ").append(today).append(". Use for \"today\", \"tomorrow\", etc.\n\n");
 
         // Tenant-specific persona (from DB templates)
@@ -185,13 +197,13 @@ public class LlmFlowService {
                 if (times != null && !times.isEmpty()) {
                     if (date.equals(today) || date.equals(tomorrow)) {
                         String dayLabel = date.equals(today) ? "Today" : "Tomorrow";
-                        immediateParts.add(dayLabel + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                        immediateParts.add(dayLabel + " " + SlotFormattingUtil.formatSlotsAsList(times));
                     } else if (LocalDate.parse(date).isBefore(todayDate.plusDays(7))) {
                         try {
                             String dayName = LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEE MMM d"));
-                            laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                            laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsList(times));
                         } catch (Exception e) {
-                            laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                            laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsList(times));
                         }
                     }
                 }
@@ -210,9 +222,9 @@ public class LlmFlowService {
                     if (!date.equals(today) && !date.equals(tomorrow) && LocalDate.parse(date).isBefore(todayDate.plusDays(7))) {
                         try {
                             String dayName = LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("EEE MMM d"));
-                            laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                                laterParts.add(dayName + " " + SlotFormattingUtil.formatSlotsAsList(times));
                         } catch (Exception e) {
-                            laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsRanges(times));
+                                laterParts.add(date + " " + SlotFormattingUtil.formatSlotsAsList(times));
                         }
                     }
                 }
@@ -420,7 +432,22 @@ public class LlmFlowService {
     /** Normalizes LLM time (e.g. 19:00 or 7 PM) to 12h format for DB (e.g. 07:00 PM). */
     private static String normalizeTimeFromLlm(String time) {
         if (time == null || time.isBlank()) return time;
-        String t = time.trim().replace('.', ':');
+        String t = time.trim();
+
+        // Normalize "p.m." / "a.m." before converting dots used as time separators.
+        // Otherwise replacing '.' globally would corrupt "p.m." into "p:m".
+        t = t.replaceAll("(?i)\\bA\\.?M\\.?\\b", "AM");
+        t = t.replaceAll("(?i)\\bP\\.?M\\.?\\b", "PM");
+
+        // Only convert dots between digits (e.g. "4.30" -> "4:30"), not every dot in the string.
+        t = t.replaceAll("(?<=\\d)\\.(?=\\d{2}\\b)", ":");
+
+        // Also accept forms like "4.0 PM" -> "4:00 PM"
+        t = t.replaceAll("(?<=\\d)\\.(?=\\d\\b)", ":0");
+
+        // Common STT mis-hearings: "4 oo" -> "4:00"
+        t = t.replaceAll("(?i)\\b(\\d{1,2})\\s*oo\\b", "$1:00");
+
         if (t.matches("\\d{1,2}:\\d{2}\\s*(AM|PM)")) return t;
         if (t.matches("\\d{1,2}:\\d{2}")) {
             int h = Integer.parseInt(t.split(":")[0]);
